@@ -6,83 +6,74 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
     const { query } = req.query;
     
     if (!query || typeof query !== 'string') {
-      res.status(400).json({ error: 'El parámetro "query" es requerido' });
+      res.status(400).json({ error: 'El parÃ¡metro "query" es requerido' });
       return;
     }
 
     const cleanQuery = query.trim();
     const isNumeric = /^\d+$/.test(cleanQuery);
-    
+
     let searchCode = cleanQuery;
     let parsedGs1Weight: number | null = null;
 
-    // Detectar código GS1 de báscula (Carnicería/Fruver: prefijo 29, 13 dígitos)
-    if (isNumeric && cleanQuery.startsWith('29') && cleanQuery.length === 13) {
-      // Formato GS1: 29 (2) + internalCode (5) + weight (5) + checkDigit (1)
+    if (isNumeric && cleanQuery.startsWith('29') && cleanQuery.length 
+=== 13) {
       const internalCode = cleanQuery.substring(2, 7);
       const weightStr = cleanQuery.substring(7, 12);
-      parsedGs1Weight = parseInt(weightStr, 10) / 1000; // Generalmente en KG
-
-      searchCode = `29${internalCode}`; 
+      parsedGs1Weight = parseInt(weightStr, 10) / 1000;
+      searchCode = `29${internalCode}`;
     }
 
     let supabaseQuery = supabaseAdmin
-      .from('siesa_codigos_barras')
-      .select('f120_id, codigo_barras, descripcion, unidad_medida, requiere_peso');
+      .from('items_siesa')
+      .select('f120_id, f120_descripcion, siesa_codigos_barras!inner(codigo_barras, unidad_medida)');
 
     if (isNumeric) {
       if (parsedGs1Weight !== null) {
-        // Es un código de báscula, buscamos el prefijo
-        supabaseQuery = supabaseQuery.like('codigo_barras', `${searchCode}%`);
+        supabaseQuery = supabaseQuery.like('siesa_codigos_barras.codigo_barras', `${searchCode}%`);
       } else {
-        // Búsqueda exacta por EAN (con o sin +) o por f120_id (item corto)
-        supabaseQuery = supabaseQuery.or(`codigo_barras.eq.${cleanQuery},codigo_barras.eq.${cleanQuery}+,f120_id.eq.${cleanQuery}`);
+        supabaseQuery = supabaseQuery.or(`siesa_codigos_barras.codigo_barras.eq.${cleanQuery},siesa_codigos_barras.codigo_barras.eq.${cleanQuery}+,f120_id.eq.${cleanQuery}`);
       }
     } else {
-      // Búsqueda por nombre de producto
-      supabaseQuery = supabaseQuery.ilike('descripcion', `%${cleanQuery}%`);
+      supabaseQuery = supabaseQuery.ilike('f120_descripcion', `%${cleanQuery}%`);
     }
 
-    const { data, error } = await supabaseQuery.limit(50); // Traemos más para poder agrupar bien
+    const { data, error } = await supabaseQuery.limit(50);
 
     if (error) {
       console.error('Error en Supabase:', error);
-      res.status(500).json({ error: 'Error consultando catálogo' });
+      res.status(500).json({ error: 'Error consultando catÃ¡logo', detail: error.message });
       return;
     }
 
-    // Agrupar resultados por f120_id
-    const grouped = data.reduce((acc: any, item: any) => {
-      if (!acc[item.f120_id]) {
-        acc[item.f120_id] = {
+    const grouped: any = {};
+    data.forEach((item: any) => {
+      if (!grouped[item.f120_id]) {
+        grouped[item.f120_id] = {
           f120_id: item.f120_id,
-          nombre: item.descripcion,
+          nombre: item.f120_descripcion,
           presentaciones: []
         };
       }
-      
-      // Evitar duplicar la misma unidad de medida para el mismo f120_id
-      const um = item.unidad_medida || 'UND';
-      const exists = acc[item.f120_id].presentaciones.find((p: any) => p.unidad_medida === um);
-      
-      if (!exists) {
-        // Lógica para detectar si requiere peso (por flag, por UM pesable, o prefijo GS1)
-        const isWeighable = item.requiere_peso === true || 
-                            ['KL', 'LB', '500GR', '250GR', 'PZ'].includes(um) || 
-                            item.codigo_barras.startsWith('29');
 
-        acc[item.f120_id].presentaciones.push({
-          codigo_barras: item.codigo_barras,
-          unidad_medida: um,
-          requiere_peso: isWeighable
-        });
-      }
-      
-      return acc;
-    }, {});
+      const barras = Array.isArray(item.siesa_codigos_barras) ? item.siesa_codigos_barras : [item.siesa_codigos_barras];
+      barras.forEach((b: any) => {
+        if (!b) return;
+        const um = b.unidad_medida || 'UND';
+        const exists = grouped[item.f120_id].presentaciones.find((p: any) => p.unidad_medida === um && p.codigo_barras === b.codigo_barras);
+
+        if (!exists) {
+          const isWeighable = ['KL', 'LB', '500GR', '250GR', 'PZ'].includes(um) || b.codigo_barras.startsWith('29');
+          grouped[item.f120_id].presentaciones.push({
+            codigo_barras: b.codigo_barras,
+            unidad_medida: um,
+            requiere_peso: isWeighable
+          });
+        }
+      });
+    });
 
     const results = Object.values(grouped).map((prod: any) => {
-      // Si fue escaneado con báscula exacta, inyectamos la data para que el Front sepa
       if (parsedGs1Weight !== null) {
         prod.scanned_quantity = parsedGs1Weight;
         prod.isGs1 = true;
@@ -91,8 +82,8 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
     });
 
     res.json(results);
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error in searchProduct:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Internal server error', detail: error.message });
   }
 };
