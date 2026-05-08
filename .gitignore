@@ -1,0 +1,25 @@
+# Ignore node_modules directory
+node_modules/
+
+# Ignore log files
+*.log
+
+# Ignore environment variable files
+.env
+
+# Ignore build output
+dist/
+build/
+
+# Ignore IDE specific files
+.vscode/
+.idea/
+
+# Ignore OS specific files
+.DS_Store
+Thumbs.db
+
+# AI/Agent config
+.claude/
+.atl/
+CLAUDE.md
