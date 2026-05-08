@@ -8,11 +8,17 @@ import adminRoutes from './modules/admin/admin.route';
 
 const app = express();
 
-app.use(helmet());
+// CORS primero — antes que cualquier otro middleware que pueda terminar la respuesta.
 app.use(cors({
-  origin: '*', // Permitir cualquier origen
+  origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Sede-ID']
+}));
+
+// helmet con CORP relajado: por default bloquea recursos cross-origin y para una
+// API consumida desde otro dominio (localhost:5173 / web pública) eso rompe todo.
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' }
 }));
 app.use(express.json());
 app.use(morgan('dev'));

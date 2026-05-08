@@ -20,7 +20,7 @@ export const getDashboardStats = async (req: Request, res: Response): Promise<vo
     
     const totalItems = itemsData.reduce((acc, item) => acc + Number(item.cantidad), 0);
 
-    // 3. Usuarios VIP Activos (que han hecho al menos una sesión)
+    // 3. Usuarios VIP Activos (que han hecho al menos una sesin)
     const { data: vipsData, error: err3 } = await supabaseAdmin
       .from('sf_sessions')
       .select('vip_user_id');
@@ -36,13 +36,13 @@ export const getDashboardStats = async (req: Request, res: Response): Promise<vo
     });
   } catch (error: any) {
     console.error('Error en getDashboardStats:', error);
-    res.status(500).json({ error: error.message || 'Error obteniendo analíticas' });
+    res.status(500).json({ error: error.message || 'Error obteniendo analticas' });
   }
 };
 
 export const getSessionsHistory = async (req: Request, res: Response): Promise<void> => {
   try {
-    // Obtenemos las últimas 50 sesiones
+    // Obtenemos las ltimas 50 sesiones
     const { data, error } = await supabaseAdmin
       .from('sf_sessions')
       .select(`
@@ -68,11 +68,13 @@ export const getSessionsHistory = async (req: Request, res: Response): Promise<v
 
 export const getVipUsers = async (req: Request, res: Response): Promise<void> => {
   try {
-    // Buscamos usuarios con rol sf_vip en la tabla profiles
+    // Obtenemos a todos los usuarios independientemente del rol.
+    // El cliente solicitó que cualquier empleado del sistema (independientemente de su rol principal)
+    // pueda escanear en Sin Filas durante días de alta carga, solo dándoles acceso a la URL.
     const { data, error } = await supabaseAdmin
       .from('profiles')
-      .select('user_id, nombre, email, ecommerce_rol')
-      .eq('ecommerce_rol', 'sf_vip');
+      .select('user_id, nombre, correo, role')
+      .order('nombre', { ascending: true });
 
     if (error) throw error;
 
