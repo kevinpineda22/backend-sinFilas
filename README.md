@@ -1,84 +1,51 @@
-# Backend Sin Filas
+﻿# Sistema "Sin Filas" - Estado y Arquitectura del Proyecto
 
-Backend del sistema **Sin Filas**: herramienta interna para empleados VIP que asisten a clientes en la fila del supermercado, escaneando los productos del carrito y generando un QR que se lee en la caja para agilizar el cobro.
+Este documento refleja el estado actual y la arquitectura del ecosistema "Sin Filas", un sistema de pre-escaneo interno (VIP) que permite a los empleados escanear y pesar productos, generando un manifiesto QR compatible con el sistema POS externo para un cobro rápido.
 
-> **Esto NO es customer-facing.** El cliente común no instala nada. Un empleado de confianza (rol `cliente_vip`) opera la app sobre el carrito del cliente.
+## 1. Repositorios y Estructura
+
+El proyecto está dividido en dos partes principales, además de la base de datos:
+
+### A. Frontend (Pagina-web_React/src/pages/sinFilas)
+Aplicación React (Vite) incrustada en el repositorio principal de la web.
+- **Convención de Nombres:** Todos los componentes específicos de este módulo usan el prefijo SF (ej. SFApp.jsx, SFManualSearch.jsx) para evitar colisiones con el resto del eCommerce.
+- **Enrutamiento:** Rutas bajo /sin-filas (App de escaneo) y /sin-filas/admin (Dashboard de control).
+- **Lógica QR:** El backend ya no firma JWTs. El frontend formatea la cadena exacta requerida por el POS (ej. QTY*CODE\r\n o GS1 de 13 dígitos para pesables) y la renderiza usando qrcode.react. La lógica vive en gs1Utils.js.
+- **Estado:** Offline-first / Local-first. El carrito se acumula en el estado de React y se envía en un solo bloque al hacer checkout.
+
+### B. Backend (Backend-sinFilas)
+Servidor Express ligero, optimizado para despliegue Serverless en Vercel.
+- **Punto de Entrada:** src/server.ts (App Express instanciada en src/app.ts).
+- **Despliegue:** Configurado vía ercel.json usando el builder @vercel/node.
+- **Módulos Activos:**
+  - /api/sf/sessions: Gestión de sesiones de escaneo (Checkout Directo).
+  - /api/sf/admin: Panel de control (Lectura de sesiones y usuarios).
+  - /api/sf/catalog: Búsqueda y listado de productos.
+- **CORS:** Configurado para aceptar solicitudes preflight (OPTIONS) de cualquier origen, permitiendo la conexión fluida desde el frontend local y de producción.
+
+### C. Base de Datos (Supabase)
+Esquema relacional estricto gestionado mediante consultas directas (sin ORM pesado).
+- **Tablas principales:** 
+  - sf_sessions: Cabecera del carrito.
+  - sf_session_items: Items escaneados y pesados.
+  - sf_qr_tokens: Tokens de sesión.
+  - sf_audit_log: Registro de eventos inmutables.
+- **Reglas Especiales:** Los roles de usuario se manejan vía el enum user_role. Se resolvió la restricción edirect NOT NULL en ole_permissions asegurando que todos los accesos tengan una ruta base configurada.
+- **Expiración QR:** Para compatibilidad futura del POS offline, los tokens insertados en la base de datos no expiran (se inserta 2099-12-31T23:59:59Z programáticamente).
+
+## 2. Decisiones Arquitectónicas Clave (ADRs)
+
+1. **Lazy Sync Session (Checkout Directo):** A diferencia de la app de Picking (donde cada acción viaja al backend), en "Sin Filas" el dispositivo móvil acumula el carrito localmente de forma rápida y offline. Solo al presionar "Finalizar", se envía el array completo de items a /api/sf/sessions/checkout-direct, reduciendo latencia y peticiones.
+2. **Generación Local del QR:** El string de texto para el POS es altamente específico. Generarlo en el frontend elimina la necesidad de transferir blobs o strings largos, manteniendo el backend exclusivamente para la persistencia transaccional.
+3. **Limpieza de Módulos:** Se eliminaron las carpetas uth, checkout e items del backend, fusionando sus responsabilidades de forma más cohesiva en sessions y dmin para simplificar el mantenimiento.
+
+## 3. Scripts y Comandos Backend
+- \
+pm run dev\: Inicia el servidor de desarrollo (nodemon).
+- \
+pm run build\: Compila TypeScript a dist/.
+- \
+pm start\: Ejecuta el servidor compilado.
 
 ---
-
-## Stack
-
-- **Node.js + Express 5 + TypeScript** (backend)
-- **Zod** para validación en los borders
-- **Supabase** (PostgreSQL + Auth) — mismo proyecto que `backend-woocommerce`
-- **Vitest** para tests
-- **Vercel** para deploy serverless
-
-## Estructura del repositorio
-
-```
-Backend-sinFilas/
-├── docs/                  ← documentación del sistema (leé esto antes de tocar código)
-├── src/                   ← código del backend (a construir)
-├── tests/                 ← tests con Vitest
-├── .env.example           ← variables de entorno requeridas
-├── package.json
-├── tsconfig.json
-└── vercel.json
-```
-
-## Documentación
-
-Leé en orden:
-
-1. [`docs/01-arquitectura.md`](docs/01-arquitectura.md) — visión del sistema, módulos, lecciones aprendidas del picking
-2. [`docs/02-base-de-datos.md`](docs/02-base-de-datos.md) — tablas nuevas y reusadas, SQL listo para correr
-3. [`docs/03-api.md`](docs/03-api.md) — endpoints con request/response
-4. [`docs/04-flujos.md`](docs/04-flujos.md) — sesión, fruver, carnicería, QR (diagramas)
-5. [`docs/05-estructura-codigo.md`](docs/05-estructura-codigo.md) — layout de carpetas, convenciones, cómo agregar un módulo
-
-## Variables de entorno
-
-```env
-PORT=3001
-NODE_ENV=development
-
-# Supabase (mismo proyecto que backend-woocommerce)
-SUPABASE_URL=...
-SUPABASE_KEY=...
-SUPABASE_JWT_SECRET=...
-
-# Firma del QR (HMAC)
-QR_SIGNING_SECRET=...
-QR_TTL_MINUTES=15
-```
-
-## Comandos (a definir cuando exista código)
-
-- `npm run dev` — servidor con auto-reload (`tsx watch src/app.ts`)
-- `npm run build` — compila TS a JS (`tsc`)
-- `npm start` — corre la versión compilada
-- `npm test` — Vitest en modo watch
-- `npm run test:run` — Vitest una vez (CI)
-- `npm run typecheck` — `tsc --noEmit`
-
-## Decisiones clave
-
-| Decisión | Por qué |
-|---|---|
-| **Sin precios en la app** | El POS calcula precios al leer el QR. Cero riesgo de descuadre. |
-| **TypeScript en backend** | Cazamos errores en build time. La curva es chica viniendo de JS. |
-| **Frontend sigue en JS** | Para no sumar fricción al equipo. Migramos cuando sea cómodo. |
-| **Tablas con prefijo `sf_`** | Aislamos del picking sin mezclar dominios. Compartimos `wc_sedes`, `siesa_codigos_barras`, `profiles`. |
-| **Auth con Supabase JWT** | Reusamos el mismo sistema que el resto. Solo agregamos rol `cliente_vip`. |
-
-## Relación con `backend-woocommerce`
-
-Repos **separados y deployados independiente**, pero comparten:
-
-- Misma base Supabase
-- Misma tabla `siesa_codigos_barras` (catálogo de barcodes)
-- Misma tabla `wc_sedes` (sucursales)
-- Tabla `profiles` (usuarios) con un rol nuevo (`cliente_vip`)
-
-Lógica que se **copia** (no se importa): GS1 utils, manifest pricing, weighable units, sede config. Mantenemos sincronizadas las dos copias hasta que tengamos un paquete compartido.
+*Documentación generada y mantenida para el ecosistema Sin Filas (Frontend React + Backend Express Vercel).*
