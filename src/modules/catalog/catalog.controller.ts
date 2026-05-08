@@ -26,7 +26,8 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
 
     let supabaseQuery = supabaseAdmin
       .from('items_siesa')
-      .select('f120_id, f120_descripcion, siesa_codigos_barras!inner(codigo_barras, unidad_medida)');
+      .select('f120_id, f120_descripcion, siesa_codigos_barras!inner(codigo_barras, unidad_medida)')
+      .eq('activo', true);
 
     if (isNumeric) {
       if (parsedGs1Weight !== null) {
@@ -35,14 +36,17 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
         supabaseQuery = supabaseQuery.or(`siesa_codigos_barras.codigo_barras.eq.${cleanQuery},siesa_codigos_barras.codigo_barras.eq.${cleanQuery}+,f120_id.eq.${cleanQuery}`);
       }
     } else {
-      supabaseQuery = supabaseQuery.ilike('f120_descripcion', `%${cleanQuery}%`);
+      const words = cleanQuery.split(/\s+/).filter(w => w.length > 0);
+      words.forEach(word => {
+        supabaseQuery = supabaseQuery.ilike('f120_descripcion', `%${word}%`);
+      });
     }
 
     const { data, error } = await supabaseQuery.limit(50);
 
     if (error) {
       console.error('Error en Supabase:', error);
-      res.status(500).json({ error: 'Error consultando catálogo', detail: error.message });
+      res.status(500).json({ error: 'Error consultando catalogo', detail: error.message });
       return;
     }
 
