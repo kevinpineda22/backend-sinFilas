@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { supabaseAdmin } from '../../shared/db/supabaseClient';
 import { searchQuerySchema } from './catalog.schemas';
+import { isManualSearchPresentation } from './catalog.utils';
 
 export const searchProduct = async (req: Request, res: Response): Promise<void> => {
   const parsed = searchQuerySchema.safeParse(req.query);
@@ -88,13 +89,28 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
       });
     });
 
-    const results = Object.values(grouped).map((prod: any) => {
-      if (parsedGs1Weight !== null) {
-        prod.scanned_quantity = parsedGs1Weight;
-        prod.isGs1 = true;
-      }
-      return prod;
-    });
+    const results = Object.values(grouped)
+      .map((prod: any) => {
+        if (parsedGs1Weight !== null) {
+          prod.scanned_quantity = parsedGs1Weight;
+          prod.isGs1 = true;
+          return prod;
+        }
+
+        // Búsqueda por texto: solo mostramos presentaciones útiles para
+        // selección manual (códigos con sufijo de unidad o GS1 pesables).
+        // En búsqueda numérica (escaneo / tipeo de código) dejamos todo
+        // para que el frontend pueda hacer match exacto.
+        if (!isNumeric) {
+          prod.presentaciones = prod.presentaciones.filter((p: any) =>
+            isManualSearchPresentation(p.codigo_barras, p.unidad_medida),
+          );
+        }
+        return prod;
+      })
+      // Si después del filtro un producto quedó sin presentaciones, no tiene
+      // sentido mostrarlo en el buscador.
+      .filter((prod: any) => isNumeric || prod.presentaciones.length > 0);
 
     res.json(results);
   } catch (error: any) {
