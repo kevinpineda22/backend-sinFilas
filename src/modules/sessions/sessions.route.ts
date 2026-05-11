@@ -1,9 +1,13 @@
 import { Router } from 'express';
-import { createDirectCheckout, redeemSession } from './sessions.controller';
+import { createDirectCheckout, redeemSession, getUserSessions } from './sessions.controller';
 import { requireAuth } from '../../shared/middleware/auth';
 import { requireSede } from '../../shared/middleware/sede';
 
 const router = Router();
+
+// GET /api/sf/sessions
+// Obtiene el historial de sesiones del usuario VIP actual
+router.get('/', requireAuth, getUserSessions);
 
 // POST /api/sf/sessions/checkout-direct
 // Requiere JWT válido (req.user) y header X-Sede-ID (req.sedeId).

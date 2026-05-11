@@ -189,7 +189,75 @@ export const redeemSession = async (req: Request, res: Response): Promise<void> 
       redeemed_at: nowIso,
     });
   } catch (error: any) {
-    console.error('Error en redeemSession:', error);
+    res.status(500).json({ error: error.message || 'Error interno del servidor' });
+  }
+};
+
+/**
+ * Obtiene el historial de sesiones del usuario VIP actual.
+ * - Requiere JWT (req.user.id).
+ * - Opcionalmente filtra por sede si se provee X-Sede-ID.
+ * - Incluye los items de cada sesión y el token QR asociado.
+ */
+export const getUserSessions = async (req: Request, res: Response): Promise<void> => {
+  if (!req.user?.id) {
+    res.status(401).json({ error: 'unauthorized', detail: 'req.user no inyectado' });
+    return;
+  }
+
+  const vipUserId = req.user.id;
+  const sedeId = req.sedeId; // puede ser undefined si no lo obligamos con requireSede
+
+  try {
+    let query = supabaseAdmin
+      .from('sf_sessions')
+      .select(`
+        id,
+        estado,
+        total_items,
+        created_at,
+        sf_session_items (
+          codigo_barras,
+          nombre_producto,
+          cantidad,
+          unidad_medida
+        ),
+        sf_qr_tokens (
+          token
+        )
+      `)
+      .eq('vip_user_id', vipUserId)
+      .order('created_at', { ascending: false });
+
+    if (sedeId) {
+      query = query.eq('sede_id', sedeId);
+    }
+
+    const { data: sessions, error } = await query;
+
+    if (error) throw error;
+
+    // Formatear respuesta para el frontend
+    const formattedSessions = sessions.map((session: any) => ({
+      id: session.id,
+      estado: session.estado,
+      total_items: session.total_items,
+      created_at: session.created_at,
+      items: session.sf_session_items.map((item: any) => ({
+        codigo_barras: item.codigo_barras,
+        nombre: item.nombre_producto,
+        cantidad: item.cantidad,
+        unidad_medida: item.unidad_medida,
+      })),
+      qrRawValue: session.sf_qr_tokens?.[0]?.token || null,
+    }));
+
+    res.status(200).json({
+      success: true,
+      data: formattedSessions,
+    });
+  } catch (error: any) {
+    console.error('Error en getUserSessions:', error);
     res.status(500).json({ error: error.message || 'Error interno del servidor' });
   }
 };

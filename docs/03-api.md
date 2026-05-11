@@ -8,11 +8,12 @@ Localmente: `http://localhost:3000/api/sf` (puerto 3000 por defecto).
 ## Convenciones
 
 - Todos los bodies y responses son JSON.
-- Errores no estandarizados: hoy los controllers devuelven `{ error: "..." }` o `{ error: "...", detail: "..." }`.
-- Códigos: `400` validación manual, `500` interno. No hay `401/403` (no hay auth implementada).
+- Errores: `{ "error": "<code>", "detail": "<msg o array>" }`.
+- Códigos: `400` validación, `401` auth, `404` no existe, `409` conflicto de estado, `500` interno.
 - Fechas en ISO 8601 UTC.
 - IDs UUID.
-- Auth: el frontend envía `Authorization: Bearer <jwt-supabase>` por interceptor (ver `sfApi.js`), **pero el backend NO lo valida hoy**.
+- Auth: endpoints protegidos esperan `Authorization: Bearer <jwt-supabase>`. El JWT se valida localmente con `SUPABASE_JWT_SECRET` (HS256).
+- Sede: endpoints transaccionales esperan `X-Sede-ID: <uuid>`. Sin ese header se devuelve 400.
 
 ---
 
@@ -33,10 +34,13 @@ Health check del servicio. Sin auth.
 
 ### `GET /api/sf/catalog/search`
 
-Busca productos por nombre, EAN, GS1-128 o `f120_id`. Devuelve resultados agrupados por producto con sus presentaciones.
+Busca productos por nombre, EAN, GS1-128 o `f120_id`. Devuelve resultados agrupados por producto con sus presentaciones útiles para selección manual.
 
-**Query params:**
-- `query` (string, requerido) — texto de búsqueda.
+**Auth:** ninguna (hoy abierto).
+**Sede:** no se usa.
+
+**Query params (Zod `searchQuerySchema`):**
+- `query` (string, requerido, 2-100 chars) — texto de búsqueda.
 
 **Comportamiento del backend (`catalog.controller.ts`):**
 
@@ -49,23 +53,48 @@ Busca productos por nombre, EAN, GS1-128 o `f120_id`. Devuelve resultados agrupa
 3. Si `query` no es numérico:
    - split por espacios y aplica un `ilike '%word%'` por palabra contra `f120_descripcion`
 
-Resultado: join con `items_siesa` activo, agrupado por `f120_id`. Cada producto tiene una lista de `presentaciones` (1 por barcode + unidad_medida única).
+Resultado: join con `items_siesa` activo, agrupado por `f120_id`.
 
-**Response 200 (texto):**
+**Filtro de presentaciones útiles para búsqueda manual** (`catalog.utils.ts: isManualSearchPresentation`):
+
+Cuando la búsqueda **NO** es numérica (escritura por texto), se filtran las presentaciones devueltas:
+- **Pesables** (`unidad_medida` en `KL`, `LB`, `500GR`, `250GR`, `PZ`): solo se aceptan códigos `^29\d{4,6}$` (GS1 corto, listo para que el frontend le concatene peso + check digit).
+- **No pesables** (`UND`, `P6`, `P25`, `P12`, ...): el código debe `endsWith(unidad_medida)` (ej. `185325UND`, `185325P25`).
+
+Productos que quedan sin presentaciones útiles tras el filtro se descartan del resultado.
+
+Cuando la búsqueda **SÍ es numérica** (escaneo o tipeo de código exacto), no se aplica este filtro — se devuelve la coincidencia tal cual para que el frontend pueda hacer match físico.
+
+**Response 200 (texto, ej. "arroz" → item 185326):**
 ```json
 [
   {
-    "f120_id": "12345",
-    "nombre": "MANGO TOMMY",
+    "f120_id": "185326",
+    "nombre": "ARROZ CONGO 500G",
     "presentaciones": [
-      { "codigo_barras": "7700001234567", "unidad_medida": "UND", "requiere_peso": false },
-      { "codigo_barras": "2912345",       "unidad_medida": "KL",  "requiere_peso": true  }
+      { "codigo_barras": "185325UND", "unidad_medida": "UND", "requiere_peso": false },
+      { "codigo_barras": "185325P25", "unidad_medida": "P25", "requiere_peso": false }
     ]
   }
 ]
 ```
 
-**Response 200 (GS1-128 con peso embebido):**
+**Response 200 (texto, ej. "papaya" → item 5073 fruver):**
+```json
+[
+  {
+    "f120_id": "5073",
+    "nombre": "PAPAYA",
+    "presentaciones": [
+      { "codigo_barras": "2900061", "unidad_medida": "KL", "requiere_peso": true }
+    ]
+  }
+]
+```
+
+> Solo aparece `2900061` (GS1 corto). Los otros códigos del catálogo (`5073KL`, `0050730050730`, `5073+`, `61`, `50730050730`) se filtran.
+
+**Response 200 (GS1-128 con peso embebido, ej. escaneo de `2998765012345`):**
 ```json
 [
   {
@@ -82,16 +111,9 @@ Resultado: join con `items_siesa` activo, agrupado por `f120_id`. Cada producto 
 
 Cuando `isGs1: true`, el frontend agrega directo al carrito con `scanned_quantity` como cantidad y sin abrir modal de peso.
 
-**Reglas de `requiere_peso`:**
-
-```ts
-requiere_peso = ['KL', 'LB', '500GR', '250GR', 'PZ'].includes(unidad_medida)
-              || codigo_barras.startsWith('29');
-```
-
-**Response 400:**
+**Response 400 (validación):**
 ```json
-{ "error": "El parámetro \"query\" es requerido" }
+{ "error": "validation-error", "detail": ["La búsqueda requiere al menos 2 caracteres"] }
 ```
 
 **Response 500:**
@@ -105,9 +127,16 @@ requiere_peso = ['KL', 'LB', '500GR', '250GR', 'PZ'].includes(unidad_medida)
 
 ### `POST /api/sf/sessions/checkout-direct`
 
-Crea la sesión y todos sus items de una sola vez (Lazy Sync). Inserta también un token QR sin expiración.
+Crea la sesión y todos sus items de una sola vez (Lazy Sync). Inserta también un token QR sin expiración real.
 
-**Body:**
+**Middlewares:** `requireAuth` → `requireSede` → `Zod body`.
+
+**Headers requeridos:**
+- `Authorization: Bearer <jwt-supabase>` — el `sub` del JWT se usa como `vip_user_id`.
+- `X-Sede-ID: <uuid>` — la sede en la que ocurre la sesión.
+- `Content-Type: application/json`.
+
+**Body (Zod `checkoutDirectBodySchema`):**
 ```json
 {
   "items": [
@@ -124,26 +153,28 @@ Crea la sesión y todos sus items de una sola vez (Lazy Sync). Inserta también 
       "unidad_medida": "KL"
     }
   ],
-  "vip_user_id": "uuid-opcional",
-  "sede_id": "uuid-opcional",
   "raw_qr_string": "3*7700001234567\r\n2998765012345"
 }
 ```
 
-**Notas importantes:**
+**Notas:**
 
-- `vip_user_id` y `sede_id` son opcionales hoy. Si no llegan → caen a `'00000000-0000-0000-0000-000000000000'` (placeholder).
-- `raw_qr_string` se acepta pero **NO se guarda**: el frontend lo arma con `generateManifestQRValue()` y lo pinta en pantalla. El backend solo persiste la sesión y un UUID como token.
+- `vip_user_id` y `sede_id` **NO** se envían en el body — vienen del JWT y del header `X-Sede-ID` respectivamente.
+- `raw_qr_string` se acepta opcionalmente pero **NO se persiste**: el QR lo arma el frontend y lo pinta en pantalla. El backend solo persiste un UUID en `sf_qr_tokens.token` como registro.
 - El estado de la sesión se inserta directo como `'finalizado'`.
-- `total_items` = `items.length` (cantidad de líneas, no suma de cantidades).
+- `total_items` = `items.length` (cantidad de líneas).
+- `unidad_medida` tiene default `'UND'` si no se envía.
+- `cantidad` debe ser un `number` positivo.
 
 **Pipeline:**
 
-1. `INSERT INTO sf_sessions (vip_user_id, sede_id, estado='finalizado', total_items)`
+1. `INSERT INTO sf_sessions (vip_user_id=req.user.id, sede_id=req.sedeId, estado='finalizado', total_items)`
 2. `INSERT INTO sf_session_items (...)` con todos los items
 3. `INSERT INTO sf_qr_tokens (session_id, token=uuid, expires_at='2099-12-31T23:59:59Z')`
+4. `logAudit('session.finalized')`
+5. `logAudit('qr.generated')`
 
-> ⚠️ Las 3 inserciones **NO están en una transacción**. Si falla la segunda o tercera, queda una sesión huérfana en BD.
+Si falla alguno de los pasos **2 o 3**, se hace **rollback manual** (`DELETE FROM sf_sessions WHERE id = ?` con CASCADE) y se escribe `session.rollback` en el audit log.
 
 **Response 201:**
 ```json
@@ -153,19 +184,64 @@ Crea la sesión y todos sus items de una sola vez (Lazy Sync). Inserta también 
 }
 ```
 
-**Response 400:**
+**Errores:**
+
+| Causa | HTTP | Body |
+|---|---|---|
+| Falta `Authorization` | 401 | `{ "error": "unauthorized", "detail": "Falta el header Authorization Bearer" }` |
+| JWT inválido / expirado / sin `sub` | 401 | `{ "error": "invalid-token", "detail": "..." }` |
+| `SUPABASE_JWT_SECRET` no configurado | 500 | `{ "error": "auth-not-configured" }` |
+| Falta `X-Sede-ID` | 400 | `{ "error": "missing-sede-id", "detail": "Falta el header X-Sede-ID" }` |
+| `X-Sede-ID` no es UUID | 400 | `{ "error": "invalid-sede-id" }` |
+| Body inválido (items vacío, cantidad ≤ 0, etc.) | 400 | `{ "error": "validation-error", "detail": [{ path, message }, ...] }` |
+| Falla Supabase | 500 | `{ "error": "<msg supabase>" }` |
+
+---
+
+### `POST /api/sf/sessions/:id/redeem`
+
+Lo llama el POS al cobrar la sesión. Marca el token QR como usado y la sesión como `cobrado`.
+
+**Middlewares:** Zod params (UUID).
+**Auth:** ninguna (el POS no maneja JWTs de Supabase). Pendiente: agregar shared-secret o JWT de sistema si se expone públicamente.
+**Sede:** no se usa (la sede ya está en la sesión).
+
+**Body:** vacío.
+
+**Pipeline:**
+
+1. `SELECT id, estado FROM sf_sessions WHERE id = :id`
+2. Si no existe → 404.
+3. Si `estado === 'cobrado'` → 409 (idempotente).
+4. Si `estado === 'cancelado'` → 409.
+5. `UPDATE sf_qr_tokens SET used_at = now() WHERE session_id = :id`
+6. `UPDATE sf_sessions SET estado='cobrado', updated_at=now() WHERE id = :id`
+7. `logAudit('qr.redeemed')`
+
+**Response 200:**
 ```json
-{ "error": "El carrito no puede estar vacío" }
+{
+  "success": true,
+  "session_id": "uuid",
+  "redeemed_at": "2026-05-11T15:42:00.000Z"
+}
 ```
 
-**Response 500:**
-```json
-{ "error": "<mensaje>" }
-```
+**Errores:**
+
+| Causa | HTTP | Body |
+|---|---|---|
+| `:id` no es UUID | 400 | `{ "error": "validation-error", "detail": ["id debe ser uuid"] }` |
+| Sesión no existe | 404 | `{ "error": "session-not-found" }` |
+| Sesión ya cobrada | 409 | `{ "error": "session-already-redeemed" }` |
+| Sesión cancelada | 409 | `{ "error": "session-cancelled" }` |
+| Falla Supabase | 500 | `{ "error": "<msg>" }` |
 
 ---
 
 ## `admin/`
+
+> ⚠️ Hoy `/admin/*` está **abierto** (sin auth). Es deuda conocida; el dashboard administrativo se difiere a la próxima fase.
 
 ### `GET /api/sf/admin/stats`
 
@@ -181,12 +257,12 @@ KPIs del dashboard.
 ```
 
 - `totalSessions` = `count(*)` de `sf_sessions`.
-- `totalItems` = `sum(cantidad)` de `sf_session_items` (sumado en memoria, no en SQL).
+- `totalItems` = `sum(cantidad)` de `sf_session_items` (sumado en memoria).
 - `activeVips` = cantidad de `vip_user_id` únicos en `sf_sessions`.
 
 ### `GET /api/sf/admin/sessions`
 
-Últimas 50 sesiones con su token QR asociado.
+Últimas 50 sesiones con su token QR asociado (incluye `used_at`).
 
 **Response 200:**
 ```json
@@ -195,7 +271,7 @@ KPIs del dashboard.
     "id": "uuid",
     "estado": "finalizado",
     "total_items": 12,
-    "created_at": "2026-05-08T14:30:00Z",
+    "created_at": "2026-05-11T14:30:00Z",
     "vip_user_id": "uuid",
     "sede_id": "uuid",
     "sf_qr_tokens": [
@@ -205,12 +281,12 @@ KPIs del dashboard.
 ]
 ```
 
-- `sf_qr_tokens[0].used_at != null` → caja ya cobró este QR. Hoy siempre es `null` (no hay endpoint que lo marque).
-- El frontend hace lookup contra `/admin/users` para resolver el nombre del VIP.
+- `sf_qr_tokens[0].used_at != null` → caja ya cobró este QR.
+- Estado `cobrado` + `used_at` poblado se sincroniza con el endpoint `/redeem`.
 
 ### `GET /api/sf/admin/users`
 
-Listado plano de usuarios. **No filtra por rol** — devuelve todos los `profiles`.
+Listado plano de usuarios (`profiles`). No filtra por rol.
 
 **Response 200:**
 ```json
@@ -220,31 +296,15 @@ Listado plano de usuarios. **No filtra por rol** — devuelve todos los `profile
 ]
 ```
 
-> Decisión de producto: cualquier empleado puede usar Sin Filas en días de alta carga, no se restringe a `sf_vip`.
-
 ---
 
-## Errores
+## Pendientes de API
 
-Hoy NO hay un mapper de errores centralizado. Cada controller hace su `try/catch` y devuelve:
-
-| Caso | HTTP | Body |
+| Endpoint / mejora | Estado | Notas |
 |---|---|---|
-| Falta `query` en catálogo | 400 | `{ error: "El parámetro \"query\" es requerido" }` |
-| Carrito vacío en checkout | 400 | `{ error: "El carrito no puede estar vacío" }` |
-| Cualquier error de Supabase | 500 | `{ error: "<msg supabase>" }` o `{ error: "...", detail: "..." }` |
-
----
-
-## Pendiente / Roadmap de la API
-
-| Endpoint | Estado | Notas |
-|---|---|---|
-| `POST /sessions/:id/redeem` | **Pendiente** | El POS necesita un endpoint para marcar `sf_qr_tokens.used_at = now()` y la sesión como `cobrado`. Hoy el dashboard espera ese estado pero nadie lo escribe. |
-| Auth middleware (JWT Supabase) | **Pendiente** | Validar `Authorization: Bearer ...`, extraer `user_id` para `vip_user_id`. Hoy se acepta cualquier llamada anónima. |
-| Validación Zod en bodies | **Pendiente** | Sólo `env.ts` usa Zod. Los controllers reciben `req.body` crudo. |
-| Escritura en `sf_audit_log` | **Pendiente** | La tabla existe, falta conectarla. |
-| Endpoint `GET /sessions/:id` | **Pendiente** | Hoy no se puede recuperar una sesión por ID con sus items. |
-| Endpoint `POST /sessions/:id/cancel` | **Pendiente** | Para marcar como `cancelado` desde el dashboard. |
-| Transacción en `checkout-direct` | **Pendiente** | Hoy las 3 inserciones son independientes; un fallo deja datos huérfanos. |
-| Rate limiting en `/admin/*` | **Pendiente** | Sin protección. |
+| Auth en `/admin/*` | Pendiente | Hoy abierto. |
+| Endpoint `GET /sessions/:id` con items | Pendiente | Para auditar detalle desde el dashboard. |
+| Endpoint `POST /sessions/:id/cancel` | Pendiente | Para mover sesión a `cancelado` desde admin. |
+| Auth/secret en `/sessions/:id/redeem` | Pendiente | Hoy abierto; aceptable mientras la URL no esté pública. |
+| Filtro por sede en `/admin/*` | Diferido | Forma parte de la fase del dashboard avanzado. |
+| Rate limiting en `/admin/*` | Pendiente | Sin protección. |

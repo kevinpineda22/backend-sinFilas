@@ -6,49 +6,83 @@ Sin Filas es una herramienta interna de **agilización de fila**. Un empleado (d
 
 **No reemplaza** la caja. No procesa pagos. No muestra precios.
 
-## Decisión arquitectónica madre: Lazy Sync + QR local
-
-Dos elecciones definen todo el resto del sistema:
+## Decisiones arquitectónicas madre
 
 1. **Lazy Sync.** El carrito no se sincroniza con el backend a cada acción. Se acumula en `localStorage` (Zustand persist) y viaja en un único `POST /sessions/checkout-direct` al finalizar.
 2. **QR generado en el frontend.** El string que entra al QR es exactamente el que el POS de la caja sabe leer (formato `QTY*CODE\r\n` + GS1 de 13 dígitos para pesables). El backend no firma ni codifica nada en el QR — solo persiste un token UUID de auditoría.
-
-Esas dos decisiones eliminan: latencia por scan, dependencia del backend en la fila, sincronización de catálogo con el POS, y validación remota desde la caja.
+3. **Sede obligatoria por sesión.** Cualquier sesión nace asociada a una sede (`wc_sedes.id`). Si el usuario es super_admin sin sede asignada, el frontend lo manda a un selector antes de dejarlo operar.
+4. **Cualquier rol autenticado puede operar.** No se restringe por rol; la única barrera es JWT válido + sede activa.
 
 ## Diagrama del sistema real
 
 ```
-┌────────────────────────┐
-│  Frontend (sinFilas)   │      Frontend embebido en Pagina-web_React
-│  - SFApp (escáner +    │      Reusa EscanerBarras del picking.
-│    carrito + QR)       │      Carrito en Zustand persist (localStorage).
-│  - AdminDashboard      │      QR generado con qrcode.react.
-└────────┬───────────────┘
+┌────────────────────────────────────────────────────────────┐
+│        Frontend (Pagina-web_React/src/pages/sinFilas)     │
+│                                                            │
+│  Entry: SFApp.jsx                                          │
+│   └─ useSFSede() carga sedes activas (Supabase)            │
+│       ├─ si NO hay sede → SFSedeSelector                   │
+│       └─ si SÍ hay sede → SFAppInner con la app real       │
+│                                                            │
+│  Componentes:                                              │
+│   - SFManualSearch (debounce de búsqueda por texto)        │
+│   - SFPresentationModal (elige unidad)                     │
+│   - SFWeightModal (gramos enteros para pesables)           │
+│   - EscanerBarras (reuso del picking, cámara)              │
+│   - QRCodeSVG (qrcode.react)                               │
+│                                                            │
+│  State: Zustand persist (`sf-cart-storage` en localStorage)│
+│  Selección de sede: `sf_sede_id` en localStorage           │
+└────────┬───────────────────────────────────────────────────┘
          │
-         │ Axios + Bearer token
-         │ (interceptor en sfApi.js — token Supabase no validado por backend hoy)
+         │ Axios + Bearer JWT (Supabase) + X-Sede-ID
          ▼
 ┌──────────────────────────────────────────────────────────────┐
-│         Backend Sin Filas (Express 5 + TS, en Vercel)        │
+│         Backend Sin Filas (Express 5 + TS, Vercel)           │
 │                                                              │
-│  src/modules/                                                │
-│   ├─ catalog    GET /catalog/search                          │
-│   ├─ sessions   POST /sessions/checkout-direct               │
-│   └─ admin      GET /admin/{stats, sessions, users}          │
+│  middlewares globales:                                       │
+│   cors(*) → helmet → express.json → morgan                   │
 │                                                              │
-│  src/shared/db/supabaseClient.ts (service_role)              │
+│  modules/                                                    │
+│   ├─ catalog/                                                │
+│   │   └─ GET /catalog/search                                 │
+│   │      Filtro de presentaciones útiles (catalog.utils.ts)  │
+│   │      - Pesables: solo GS1 corto 29\d{4,6}                │
+│   │      - No pesables: codigo endsWith(unidad_medida)       │
+│   │                                                          │
+│   ├─ sessions/                                               │
+│   │   ├─ POST /sessions/checkout-direct                      │
+│   │   │   [requireAuth + requireSede + Zod]                  │
+│   │   │   Inserta sesión + items + token. Rollback manual    │
+│   │   │   (DELETE sf_sessions) si falla items/token.         │
+│   │   │   Audit: session.finalized + qr.generated            │
+│   │   │                                                      │
+│   │   └─ POST /sessions/:id/redeem                           │
+│   │       Sin auth (lo llama el POS). Marca used_at en       │
+│   │       sf_qr_tokens y estado='cobrado' en sf_sessions.    │
+│   │       Audit: qr.redeemed                                 │
+│   │                                                          │
+│   └─ admin/                                                  │
+│       GET /admin/{stats,sessions,users}                      │
+│       (hoy sin auth; el dashboard se difiere)                │
+│                                                              │
+│  shared/                                                     │
+│   ├─ db/supabaseClient.ts (service_role, bypassa RLS)        │
+│   ├─ middleware/auth.ts (requireAuth — JWT local)            │
+│   ├─ middleware/sede.ts (requireSede + optionalSede)         │
+│   └─ audit/auditWriter.ts (logAudit fire-and-forget)         │
 └────────┬─────────────────────────────────────────────────────┘
          │
          │ Service role key (bypassa RLS)
          ▼
 ┌─────────────────────────────────────────────────────────────┐
-│             Supabase (PostgreSQL compartido con picking)     │
+│             Supabase (PostgreSQL compartido)                 │
 │                                                              │
 │  Tablas sf_*:                                                │
 │   - sf_sessions       (ENUM sf_session_state)                │
 │   - sf_session_items                                         │
-│   - sf_qr_tokens      (used_at = null hasta que POS confirme)│
-│   - sf_audit_log      (existe, sin escritura aún)            │
+│   - sf_qr_tokens      (used_at se actualiza desde /redeem)   │
+│   - sf_audit_log      (se escribe desde logAudit)            │
 │                                                              │
 │  Tablas reusadas (sólo lectura):                             │
 │   - profiles (user_id, nombre, correo, role)                 │
@@ -58,8 +92,9 @@ Esas dos decisiones eliminan: latencia por scan, dependencia del backend en la f
 └─────────────────────────────────────────────────────────────┘
 
                          ║
-              No hay conexión backend ↔ POS (todavía).
-              El POS lee la string cruda del QR y no llama al backend.
+              No hay conexión backend ↔ POS automática.
+              El POS lee la string cruda del QR; al cobrar puede
+              opcionalmente llamar a /sessions/:id/redeem.
                          ║
 
 ┌────────────────────────┐
@@ -68,24 +103,24 @@ Esas dos decisiones eliminan: latencia por scan, dependencia del backend en la f
 └────────────────────────┘      Mismo formato que el picking.
 ```
 
-## Módulos del backend (estado real)
+## Módulos del backend
 
-| Módulo | Endpoint | Responsabilidad |
-|---|---|---|
-| `catalog` | `GET /catalog/search` | Busca productos por texto, EAN o GS1-128. Detecta peso embebido en GS1 (prefijo `29`). Agrupa por `f120_id` con presentaciones (`unidad_medida` + `requiere_peso`). |
-| `sessions` | `POST /sessions/checkout-direct` | Recibe el carrito completo, inserta sesión + items + token UUID. Una sola llamada por sesión. |
-| `admin` | `GET /admin/stats` `GET /admin/sessions` `GET /admin/users` | Datos para el dashboard administrativo (KPIs, historial, usuarios). |
-| `health` | `GET /health` | Health check para Vercel. |
+| Módulo | Endpoint | Middlewares | Responsabilidad |
+|---|---|---|---|
+| `catalog` | `GET /catalog/search` | (ninguno) | Busca productos por texto, EAN o GS1-128. Filtra presentaciones útiles para selección manual (`catalog.utils.ts`). |
+| `sessions` | `POST /sessions/checkout-direct` | `requireAuth`, `requireSede`, Zod body | Recibe el carrito completo, inserta sesión + items + token UUID con rollback. Escribe audit log. |
+| `sessions` | `POST /sessions/:id/redeem` | Zod params | Marca el QR como cobrado (lo llama el POS). |
+| `admin` | `GET /admin/*` | (ninguno por ahora) | Datos del dashboard administrativo. |
+| `health` | `GET /health` | (ninguno) | Health check. |
 
-### Módulos del plan inicial que NO existen (y por qué)
+## Middlewares compartidos
 
-Los borramos al pivotear a Lazy Sync:
-
-| Módulo eliminado | Por qué no se necesitó |
+| Middleware | Qué hace |
 |---|---|
-| `auth` (verifyJwt + requireRole) | Hoy no hay auth real. Cualquier empleado con la URL puede entrar. Pendiente reintegrar como middleware. |
-| `items` (CRUD por item) | El frontend acumula el carrito local y manda todo de una en `checkout-direct`. No hay edición remota. |
-| `checkout/redeem` (POS valida QR contra backend) | El POS lee la string cruda del QR sin pasar por el backend. |
+| `requireAuth` (`shared/middleware/auth.ts`) | Valida `Authorization: Bearer <jwt>` con `SUPABASE_JWT_SECRET` localmente (jsonwebtoken). Inyecta `req.user = { id, email, role }`. Sin llamada HTTP a Supabase. 401 si falta o es inválido. |
+| `requireSede` (`shared/middleware/sede.ts`) | Lee `X-Sede-ID`, valida UUID, inyecta `req.sedeId`. 400 si falta o es inválido. |
+| `optionalSede` | Versión laxa de `requireSede`: no falla si falta el header. |
+| `logAudit` (`shared/audit/auditWriter.ts`) | Helper async para insertar en `sf_audit_log`. Fire-and-forget (no rompe la operación si falla). |
 
 ## Stack
 
@@ -93,10 +128,11 @@ Los borramos al pivotear a Lazy Sync:
 |---|---|
 | Runtime | Node.js |
 | Framework | Express 5 |
-| Lenguaje | TypeScript (con `strict: false` — pendiente de endurecer) |
-| Validación | Zod (sólo en `config/env.ts`; pendiente extender a bodies) |
+| Lenguaje | TypeScript (`strictNullChecks` + `noImplicitAny` ON; `strict` aún OFF) |
+| Validación | Zod en `env.ts` y en bodies/params de cada módulo |
+| Auth backend | `jsonwebtoken` validando HS256 contra `SUPABASE_JWT_SECRET` |
 | DB | Supabase (PostgreSQL) — mismo proyecto que picking |
-| Auth | Supabase Auth (JWT) — **no validado en backend hoy** |
+| Tests | Vitest + supertest + mock encadenable de Supabase |
 | Frontend | React 19 + Vite (embebido en Pagina-web_React) |
 | Estado FE | Zustand 5 (cart con `persist`) |
 | QR | `qrcode.react` |
@@ -117,28 +153,23 @@ Lo que **NO reutilizamos**:
 - Sede service multi-tenant del picking (Sin Filas usa solo `sede_id` plano por sesión).
 - Servicios de sync (no hay sync — el QR va directo al POS).
 
-## Lecciones del picking que (todavía) NO aplicamos
+## Lecciones del picking aplicadas (estado actual)
 
-Estas las teníamos como objetivos al diseñar Sin Filas, pero el código actual aún no las cumple. Listadas para resolverlas en próximas iteraciones:
-
-| Objetivo | Estado |
+| Práctica | Estado |
 |---|---|
-| Capas separadas `route → controller → service → repository` | Parcial. Tenemos `route → controller` que hacen todo. Falta `service` y `repository`. |
-| Validación Zod en bodies | Pendiente. Sólo `env.ts` usa Zod. |
-| Errores tipados + middleware central | Pendiente. Cada controller hace su `try/catch + res.status(500)`. |
-| Logs estructurados (Pino) | Pendiente. Hoy `console.error` y `morgan` para HTTP. |
-| Tests con Vitest | Pendiente. No hay configuración ni archivos. |
-| `tsconfig` strict | Pendiente. `strict: false` (algunos null checks se escapan). |
-| Audit log conectado | Pendiente. Tabla creada, código no la usa. |
+| Validación Zod en bodies | ✅ Sí, en cada módulo |
+| Auth tipado en `req.user` | ✅ Sí (`requireAuth` + augmentation de `Express.Request`) |
+| Audit log conectado | ✅ Sí (`logAudit` en eventos clave) |
+| Tests con runner moderno | ✅ Vitest + supertest, 84 tests verdes |
+| TypeScript estricto | ⚠️ Parcial (`strictNullChecks` + `noImplicitAny` ON) |
+| Capas `route → controller → service → repository` | ⏳ Pendiente (hoy `route → controller` que hace todo) |
+| Logger estructurado (Pino) | ⏳ Pendiente (hoy `console.error` + `morgan`) |
 
-## Lo que NO entra en v1
-
-Para evitar scope creep:
+## Lo que NO entra en esta fase
 
 - App para el cliente común (auto-scan).
 - Sync de catálogo desde WooCommerce.
-- Reportes avanzados / heatmaps.
+- Filtro de sede en `/admin/*` y dashboard avanzado (se difiere a fase 2).
 - Notificaciones push.
-- Modo offline robusto con queue de reintento (la v1 asume conexión al hacer el `checkout-direct`).
+- Modo offline robusto con queue de reintento.
 - Identificación del cliente final (cédula, lealtad, cupones).
-- Validación del QR contra backend desde el POS (depende del equipo del POS).
