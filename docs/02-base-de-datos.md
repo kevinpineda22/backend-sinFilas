@@ -2,198 +2,193 @@
 
 Sin Filas usa el **mismo proyecto Supabase** que `backend-woocommerce`. Las tablas nuevas llevan prefijo `sf_` para aislar dominios sin duplicar Supabase.
 
-## Tablas nuevas
+> El script canónico vive en [`06-supabase-setup.sql`](06-supabase-setup.sql). Lo que sigue documenta cada tabla y cómo se usa hoy en el código.
+
+## Tipo enumerado
+
+```sql
+CREATE TYPE public.sf_session_state AS ENUM (
+  'en_proceso',
+  'finalizado',
+  'cobrado',
+  'cancelado'
+);
+```
+
+- `en_proceso` — valor por defecto al `INSERT`. Hoy NO se usa: el flujo Lazy Sync crea la sesión ya en `finalizado`.
+- `finalizado` — sesión cerrada por el VIP, QR generado.
+- `cobrado` — el POS de la caja redimió el QR. (Hoy no hay endpoint que lo escriba todavía.)
+- `cancelado` — sesión descartada.
+
+## Tablas
 
 ### `sf_sessions`
 
-Una sesión = un carrito de un cliente que un VIP está procesando.
+Cabecera del carrito de un cliente VIP.
 
 ```sql
-CREATE TABLE sf_sessions (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  vip_user_id     UUID NOT NULL REFERENCES profiles(id),
-  sede_id         UUID NOT NULL REFERENCES wc_sedes(id),
-  estado          TEXT NOT NULL DEFAULT 'abierta'
-                  CHECK (estado IN ('abierta','finalizada','cobrada','cancelada')),
-  total_items     INTEGER NOT NULL DEFAULT 0,
-  cliente_nota    TEXT,                              -- nombre/referencia opcional del cliente
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  finalized_at    TIMESTAMPTZ,
-  redeemed_at     TIMESTAMPTZ,
-  cancelled_at    TIMESTAMPTZ,
-  CONSTRAINT sf_sessions_estado_consistencia CHECK (
-    (estado = 'abierta'     AND finalized_at IS NULL AND redeemed_at IS NULL AND cancelled_at IS NULL) OR
-    (estado = 'finalizada'  AND finalized_at IS NOT NULL AND redeemed_at IS NULL AND cancelled_at IS NULL) OR
-    (estado = 'cobrada'     AND finalized_at IS NOT NULL AND redeemed_at IS NOT NULL AND cancelled_at IS NULL) OR
-    (estado = 'cancelada'   AND cancelled_at IS NOT NULL)
-  )
+CREATE TABLE public.sf_sessions (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  vip_user_id  uuid NOT NULL REFERENCES profiles(user_id) ON DELETE RESTRICT,
+  sede_id      uuid NOT NULL REFERENCES wc_sedes(id)      ON DELETE RESTRICT,
+  estado       sf_session_state NOT NULL DEFAULT 'en_proceso',
+  total_items  numeric NOT NULL DEFAULT 0,
+  created_at   timestamptz DEFAULT now(),
+  updated_at   timestamptz DEFAULT now()
 );
 
-CREATE INDEX idx_sf_sessions_vip_estado ON sf_sessions (vip_user_id, estado);
-CREATE INDEX idx_sf_sessions_sede_estado ON sf_sessions (sede_id, estado);
-CREATE INDEX idx_sf_sessions_created_at ON sf_sessions (created_at DESC);
+CREATE INDEX idx_sf_sessions_vip    ON sf_sessions (vip_user_id);
+CREATE INDEX idx_sf_sessions_sede   ON sf_sessions (sede_id);
+CREATE INDEX idx_sf_sessions_estado ON sf_sessions (estado);
 ```
 
-**Reglas de negocio:**
+**Notas:**
 
-- Un VIP puede tener **una sola sesión `abierta` por sede** (regla aplicada en service, no en DB, para flexibilidad).
-- Las transiciones de estado son one-way: `abierta → finalizada → cobrada` o `abierta → cancelada`.
-- Una sesión `finalizada` no se puede modificar (no se agregan/quitan items).
+- `vip_user_id` referencia `profiles.user_id` (NO `profiles.id`).
+- `total_items` se guarda como conteo simple de líneas (`items.length` desde el controller).
+- `updated_at` no se actualiza solo: no hay trigger configurado todavía.
 
-### `sf_items`
+### `sf_session_items`
 
-Items dentro de una sesión.
+Items escaneados/pesados dentro de una sesión.
 
 ```sql
-CREATE TABLE sf_items (
-  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  session_id        UUID NOT NULL REFERENCES sf_sessions(id) ON DELETE CASCADE,
-  siesa_codigo      TEXT NOT NULL,                   -- f120_id (numeric SKU)
-  nombre            TEXT NOT NULL,                   -- snapshot del nombre al momento del scan
-  unidad_medida     TEXT NOT NULL,                   -- KL, LB, 500GR, UND, P6...
-  cantidad          NUMERIC(10,3) NOT NULL,          -- 3 decimales: 0.500 (500gr), 1.250 (1.25kg), 2 (2 und)
-  origen            TEXT NOT NULL
-                    CHECK (origen IN ('scan_ean','scan_gs1','busqueda_manual')),
-  ean_escaneado     TEXT,                            -- el EAN/GS1 escaneado, si aplica
-  metadata          JSONB,                           -- libre: gs1_raw, lote, vencimiento, etc.
-  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE public.sf_session_items (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id       uuid NOT NULL REFERENCES sf_sessions(id) ON DELETE CASCADE,
+  codigo_barras    text NOT NULL,
+  nombre_producto  text,
+  cantidad         numeric NOT NULL DEFAULT 1,
+  unidad_medida    text DEFAULT 'UND',
+  created_at       timestamptz DEFAULT now()
 );
 
-CREATE INDEX idx_sf_items_session ON sf_items (session_id);
-CREATE INDEX idx_sf_items_siesa ON sf_items (siesa_codigo);
+CREATE INDEX idx_sf_items_session ON sf_session_items (session_id);
 ```
 
-**Reglas de negocio:**
+**Notas:**
 
-- `cantidad` siempre es positiva. "Quitar un item" = `DELETE`, no cantidad negativa.
-- `ean_escaneado` se guarda para auditoría, aunque el producto resuelto sea otro.
-- El frontend NO ve precios. Backend tampoco los guarda. Solo `siesa_codigo + cantidad + unidad_medida` viajan al QR.
+- El nombre real de la tabla es `sf_session_items` (no `sf_items` como decía la doc inicial).
+- `codigo_barras` guarda el código que se va a meter al QR. Si es pesable, ya viene en formato GS1 (prefijo `29` + sku + peso + check digit), generado en el frontend con `gs1Utils.js`.
+- No se guarda `siesa_codigo` ni `origen` (no hay columna). La fuente del item se conserva implícitamente: si arranca con `29` y mide 13 chars → fue GS1 dinámico (con peso embebido).
+- `cantidad` queda `1` para items GS1 con peso embebido (la cantidad ya está en los gramos del propio código).
 
 ### `sf_qr_tokens`
 
-Tokens single-use que se generan al finalizar una sesión.
+Token único por sesión que el POS escanea.
 
 ```sql
-CREATE TABLE sf_qr_tokens (
-  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  session_id    UUID NOT NULL REFERENCES sf_sessions(id) ON DELETE CASCADE,
-  token         TEXT NOT NULL UNIQUE,                -- HMAC-firmado, lo que va en el QR
-  expires_at    TIMESTAMPTZ NOT NULL,
-  redeemed_at   TIMESTAMPTZ,
-  redeemed_by   UUID REFERENCES profiles(id),        -- opcional: quién en caja lo redimió
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE public.sf_qr_tokens (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id   uuid NOT NULL REFERENCES sf_sessions(id) ON DELETE CASCADE,
+  token        text NOT NULL UNIQUE,
+  expires_at   timestamptz NOT NULL,
+  used_at      timestamptz,
+  created_at   timestamptz DEFAULT now()
 );
 
-CREATE INDEX idx_sf_qr_tokens_session ON sf_qr_tokens (session_id);
-CREATE UNIQUE INDEX idx_sf_qr_tokens_token ON sf_qr_tokens (token);
+CREATE INDEX idx_sf_qr_token ON sf_qr_tokens (token);
 ```
 
-**Reglas:**
+**Notas:**
 
-- Un token se considera **redimido** si `redeemed_at IS NOT NULL`. Reintento de redeem retorna 409.
-- TTL configurable (`QR_TTL_MINUTES`, default 15 min).
-- Si una sesión genera un nuevo QR (re-finalize en caso de error), el token anterior se invalida (se elimina o se marca `expires_at = now()`).
+- La columna que marca "ya cobrado en caja" es `used_at` (NO `redeemed_at`).
+- Hoy `token` es un UUID aleatorio (`crypto.randomUUID()`), no un JWT firmado. La caja NO valida firma — lee la string cruda del manifiesto QR que el frontend pinta.
+- `expires_at` se inserta como `2099-12-31T23:59:59Z` para mantener compatibilidad con un POS offline a futuro.
+- No existe todavía un endpoint que actualice `used_at`: el dashboard la lee pero siempre da `null`.
 
 ### `sf_audit_log`
 
-Bitácora de eventos críticos.
+Bitácora de eventos.
 
 ```sql
-CREATE TABLE sf_audit_log (
-  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  session_id    UUID REFERENCES sf_sessions(id) ON DELETE SET NULL,
-  user_id       UUID REFERENCES profiles(id),
-  action        TEXT NOT NULL,                       -- session.created, item.added, item.removed, session.finalized, qr.redeemed, ...
-  payload       JSONB,                               -- contexto del evento
-  ip            TEXT,
-  user_agent    TEXT,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE public.sf_audit_log (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id  uuid REFERENCES sf_sessions(id) ON DELETE SET NULL,
+  user_id     uuid REFERENCES profiles(user_id) ON DELETE SET NULL,
+  action      text NOT NULL,
+  details     jsonb DEFAULT '{}'::jsonb,
+  created_at  timestamptz DEFAULT now()
 );
 
-CREATE INDEX idx_sf_audit_session ON sf_audit_log (session_id, created_at DESC);
-CREATE INDEX idx_sf_audit_action ON sf_audit_log (action, created_at DESC);
+CREATE INDEX idx_sf_audit_session ON sf_audit_log (session_id);
 ```
 
-**Acciones definidas:**
+**Notas:**
 
-- `session.created`, `session.cancelled`, `session.finalized`
-- `item.added`, `item.updated`, `item.removed`
-- `qr.generated`, `qr.redeemed`, `qr.expired`
-- `auth.unauthorized` (intento sin rol válido)
+- La tabla EXISTE en BD pero el código todavía no escribe nada acá. Cuando se conecte, usar `details` (jsonb) para el payload del evento.
+- Acciones sugeridas cuando se implemente: `session.created`, `session.finalized`, `qr.generated`, `qr.redeemed`, `session.cancelled`.
 
 ## Tablas existentes que reusamos
 
-### `profiles` (existente — agregamos rol)
+### `profiles`
 
-Usuarios de Supabase Auth. Sin Filas agrega un rol nuevo:
-
-```sql
--- Asumiendo que profiles ya tiene una columna `rol` (text) o similar.
--- Si no existe, hay que agregarla:
-ALTER TABLE profiles ADD COLUMN IF NOT EXISTS rol TEXT;
-
--- Roles válidos para Sin Filas:
---   'cliente_vip'    → puede crear sesiones, escanear, finalizar
---   'admin_sf'       → todo lo anterior + cancelar/ver sesiones de otros (futuro)
-```
-
-> ⚠️ **Acción requerida antes de codear:** revisar el esquema actual de `profiles` para confirmar si tiene columna de rol, y cómo está estructurada (ENUM, TEXT, tabla aparte). Adaptar el middleware de auth en consecuencia.
-
-### `wc_sedes` (existente — solo lectura)
-
-Sede donde opera la sesión. Sin Filas usa solo `id`, `slug`, `nombre`, `activa`.
-
-### `siesa_codigos_barras` (existente — solo lectura)
-
-Catálogo de productos por código de barras. Estructura relevante:
+Usuarios de Supabase Auth. El PK lógico que usamos es `user_id`.
 
 | Columna | Uso en Sin Filas |
 |---|---|
-| `f120_id` | SKU numérico de SIESA — lo guardamos como `sf_items.siesa_codigo` |
-| `descripcion` | Nombre del producto — lo snapshoteamos en `sf_items.nombre` |
-| `codigo_barras` | EAN — lo buscamos al hacer scan |
-| `unidad_medida` | KL, LB, 500GR, UND, P6 — define el flujo de cantidad |
-| `requiere_peso` (si existe) | Booleano: si true, abrir modal de peso |
+| `user_id` | FK desde `sf_sessions.vip_user_id` y `sf_audit_log.user_id` |
+| `nombre`  | Mostrado en el dashboard admin |
+| `correo`  | Mostrado en el dashboard admin |
+| `role`    | Rol del usuario; cualquier empleado puede usar Sin Filas, no se filtra |
 
-> ⚠️ **Acción requerida antes de codear:** mirar las columnas reales de `siesa_codigos_barras` (puede que algunas mencionadas tengan otro nombre). Adaptar las queries.
+### `wc_sedes`
+
+Sede donde opera la sesión. Se usa `id` como FK desde `sf_sessions.sede_id`.
+
+### `items_siesa` + `siesa_codigos_barras`
+
+Catálogo de productos. El módulo `catalog/search` hace un join:
+
+```ts
+supabaseAdmin
+  .from('items_siesa')
+  .select('f120_id, f120_descripcion, siesa_codigos_barras!inner(codigo_barras, unidad_medida)')
+  .eq('activo', true)
+```
+
+Columnas relevantes:
+
+| Tabla | Columna | Uso |
+|---|---|---|
+| `items_siesa` | `f120_id` | SKU numérico (clave del producto) |
+| `items_siesa` | `f120_descripcion` | Nombre mostrado en el frontend |
+| `items_siesa` | `activo` | Filtro: sólo productos activos |
+| `siesa_codigos_barras` | `codigo_barras` | EAN/GS1 buscado al escanear |
+| `siesa_codigos_barras` | `unidad_medida` | KL, LB, 500GR, 250GR, PZ, UND, P6... |
+
+### `role_permissions`
+
+Matriz de rutas habilitadas por rol. Ver [`07-roles-setup.sql`](07-roles-setup.sql) para los inserts de `sf_vip` y `sf_admin`.
 
 ## Diagrama de relaciones
 
 ```
-profiles ─────────────┐
- (cliente_vip)        │
-                      │ vip_user_id
-                      ▼
-                 sf_sessions ◀──── wc_sedes
-                  │  │  │            (sede_id)
-                  │  │  └─────▶ sf_qr_tokens (1:N, último vigente)
-                  │  └────────▶ sf_items (1:N)
-                  │                │
-                  │                │ siesa_codigo
-                  │                ▼
-                  │          siesa_codigos_barras
-                  │
-                  └────────▶ sf_audit_log (1:N)
+profiles ──────────────────┐
+ (user_id)                 │
+                           │ vip_user_id, user_id
+                           ▼
+                      sf_sessions ◀──── wc_sedes (sede_id)
+                       │   │
+                       │   ├──▶ sf_session_items (1:N)
+                       │   ├──▶ sf_qr_tokens     (1:1 activo)
+                       │   └──▶ sf_audit_log     (1:N — pendiente de implementación)
+                       │
+                       └──── (productos vienen de items_siesa + siesa_codigos_barras)
 ```
-
-## Migrations
-
-Las migrations viven en `supabase/migrations/` siguiendo el formato `YYYYMMDDHHMMSS_descripcion.sql`. La primera:
-
-```
-supabase/migrations/20260508000000_init_sin_filas.sql
-```
-
-Contiene los `CREATE TABLE` de las 4 tablas `sf_*` y el `ALTER TABLE profiles` si hace falta.
 
 ## Row Level Security (RLS)
 
-Activar RLS en todas las tablas `sf_*`. Políticas:
+**Pendiente.** Las tablas `sf_*` hoy no tienen RLS. El backend usa la `service_role` key (que bypassa RLS), pero si en algún momento el frontend lee directo de Supabase con la `anon` key habrá que definir políticas:
 
-- `sf_sessions`: el VIP solo ve sus propias sesiones; admin_sf ve todas.
-- `sf_items`: visibles si el usuario tiene acceso a la `session_id`.
-- `sf_qr_tokens`: solo lectura por el dueño de la sesión y caja (rol caja a definir).
-- `sf_audit_log`: solo lectura para admin_sf, escritura desde service role.
+- `sf_sessions`: el VIP solo ve sus propias sesiones; admin ve todas.
+- `sf_session_items`: visibles si el usuario tiene acceso a la `session_id`.
+- `sf_qr_tokens`: solo lectura por el dueño de la sesión.
+- `sf_audit_log`: solo lectura para admin, escritura desde service role.
 
-> Las políticas concretas se redactan cuando definamos el detalle del rol caja y el flujo de redeem.
+## Gaps conocidos
+
+- `sf_audit_log` no se escribe desde código todavía.
+- `sf_qr_tokens.used_at` nunca se actualiza (falta endpoint que el POS llame al cobrar).
+- `sf_sessions.updated_at` no tiene trigger que la mantenga al día.
+- `sf_sessions.estado` por defecto es `en_proceso` pero el flujo Lazy Sync inserta directo `finalizado`. Si en algún futuro se hace un flujo "abrir sesión → ir agregando items remotamente", el default ya está en el estado correcto.

@@ -1,349 +1,246 @@
-# 05 — Estructura del código y convenciones
+# 05 — Estructura del código (estado real)
 
-Layout completo del proyecto cuando esté implementado.
+Layout real del backend tal como está hoy. Lo que era plan inicial y todavía no se materializó queda anotado al final como _Roadmap de estructura_.
 
-## Layout
+## Layout actual
 
 ```
 Backend-sinFilas/
-├── docs/                            ← documentación (este lugar)
+├── docs/
+│   ├── 01-arquitectura.md
+│   ├── 02-base-de-datos.md
+│   ├── 03-api.md
+│   ├── 04-flujos.md
+│   ├── 05-estructura-codigo.md     (este archivo)
+│   ├── 06-supabase-setup.sql       (schema canónico)
+│   └── 07-roles-setup.sql          (role_permissions)
 │
 ├── src/
-│   ├── app.ts                       ← Express app, monta rutas + middleware
-│   ├── server.ts                    ← bootstrap (listen) — solo en dev local
+│   ├── app.ts                      (Express app, middlewares, monta routers)
+│   ├── server.ts                   (bootstrap; no llama listen en Vercel)
+│   │
 │   ├── config/
-│   │   ├── env.ts                   ← validación Zod de process.env
-│   │   └── constants.ts             ← TTLs, límites, magic numbers
+│   │   └── env.ts                  (validación Zod de process.env)
 │   │
 │   ├── modules/
-│   │   ├── auth/
-│   │   │   ├── auth.routes.ts
-│   │   │   ├── auth.controller.ts
-│   │   │   ├── auth.service.ts
-│   │   │   ├── auth.middleware.ts   ← verifyJwt + requireRole
-│   │   │   └── auth.schemas.ts      ← Zod
-│   │   │
 │   │   ├── catalog/
-│   │   │   ├── catalog.routes.ts
-│   │   │   ├── catalog.controller.ts
-│   │   │   ├── catalog.service.ts
-│   │   │   ├── catalog.repository.ts
-│   │   │   └── catalog.schemas.ts
+│   │   │   ├── catalog.route.ts
+│   │   │   └── catalog.controller.ts
 │   │   │
 │   │   ├── sessions/
-│   │   │   ├── sessions.routes.ts
-│   │   │   ├── sessions.controller.ts
-│   │   │   ├── sessions.service.ts
-│   │   │   ├── sessions.repository.ts
-│   │   │   └── sessions.schemas.ts
+│   │   │   ├── sessions.route.ts
+│   │   │   └── sessions.controller.ts
 │   │   │
-│   │   ├── items/
-│   │   │   ├── items.routes.ts
-│   │   │   ├── items.controller.ts
-│   │   │   ├── items.service.ts
-│   │   │   ├── items.repository.ts
-│   │   │   └── items.schemas.ts
-│   │   │
-│   │   └── checkout/
-│   │       ├── checkout.routes.ts
-│   │       ├── checkout.controller.ts
-│   │       ├── checkout.service.ts
-│   │       ├── checkout.repository.ts
-│   │       ├── checkout.qr.ts       ← firma/verificación HMAC
-│   │       └── checkout.schemas.ts
+│   │   └── admin/
+│   │       ├── admin.route.ts
+│   │       └── admin.controller.ts
 │   │
 │   └── shared/
-│       ├── db/
-│       │   ├── supabase.ts          ← cliente Supabase tipado
-│       │   └── types.ts             ← tipos de las tablas (idealmente generados)
-│       ├── errors/
-│       │   ├── AppError.ts          ← clase base
-│       │   ├── NotFoundError.ts
-│       │   ├── UnauthorizedError.ts
-│       │   ├── ForbiddenError.ts
-│       │   ├── ConflictError.ts
-│       │   └── ValidationError.ts
-│       ├── middleware/
-│       │   ├── errorHandler.ts      ← maps AppError → JSON response
-│       │   ├── requestId.ts         ← uuid por request, inyectado al logger
-│       │   ├── sede.ts              ← lee X-Sede-ID
-│       │   └── audit.ts             ← helper logAudit(action, payload)
-│       ├── barcode/
-│       │   ├── gs1.ts               ← parseGS1, copiado del picking
-│       │   └── classifier.ts        ← detecta tipo (EAN/GS1/inválido)
-│       ├── pricing/
-│       │   └── manifestPricing.ts   ← calcLineCharge, copiado del picking
-│       ├── units/
-│       │   └── weighableUnits.ts    ← clasificación KL/LB/500GR/UND
-│       ├── logger/
-│       │   └── logger.ts            ← Pino instance
-│       └── utils/
-│           ├── asyncHandler.ts      ← wrapper para controllers async
-│           └── dates.ts
+│       └── db/
+│           └── supabaseClient.ts   (cliente service_role, único)
 │
-├── tests/
-│   ├── unit/
-│   │   └── shared/
-│   │       └── barcode/
-│   │           └── gs1.test.ts
-│   ├── integration/
-│   │   ├── sessions.test.ts
-│   │   ├── items.test.ts
-│   │   └── checkout.test.ts
-│   └── helpers/
-│       └── supabaseMock.ts
-│
-├── supabase/
-│   └── migrations/
-│       └── 20260508000000_init_sin_filas.sql
-│
-├── .env.example
+├── .env                             (NO commiteado)
 ├── .gitignore
 ├── package.json
+├── package-lock.json
 ├── tsconfig.json
-├── vitest.config.ts
-├── vercel.json
-├── nodemon.json (opcional, si no usás tsx watch)
-└── README.md
+└── vercel.json
 ```
 
 ## Anatomía de un módulo
 
-Tomamos `items` como ejemplo. Cada módulo sigue este patrón:
+Los módulos hoy tienen sólo `route + controller`. Ejemplo real (`catalog`):
 
-### `items.routes.ts`
+### `catalog/catalog.route.ts`
 
-```typescript
-import { Router } from 'express'
-import { itemsController } from './items.controller'
-import { verifyJwt, requireRole } from '../auth/auth.middleware'
-import { sedeMiddleware } from '../../shared/middleware/sede'
+```ts
+import { Router } from 'express';
+import { searchProduct } from './catalog.controller';
 
-export const itemsRouter = Router({ mergeParams: true })
+const router = Router();
 
-itemsRouter.use(verifyJwt, requireRole(['cliente_vip', 'admin_sf']), sedeMiddleware)
+router.get('/search', searchProduct);
 
-itemsRouter.post('/', itemsController.add)
-itemsRouter.patch('/:itemId', itemsController.update)
-itemsRouter.delete('/:itemId', itemsController.remove)
+export default router;
 ```
 
-### `items.controller.ts`
+### `catalog/catalog.controller.ts`
 
-```typescript
-import { Request, Response } from 'express'
-import { itemsService } from './items.service'
-import { addItemBodySchema, updateItemBodySchema } from './items.schemas'
-import { asyncHandler } from '../../shared/utils/asyncHandler'
+```ts
+import { Request, Response } from 'express';
+import { supabaseAdmin } from '../../shared/db/supabaseClient';
 
-export const itemsController = {
-  add: asyncHandler(async (req: Request, res: Response) => {
-    const body = addItemBodySchema.parse(req.body)
-    const sessionId = req.params.sessionId
-    const item = await itemsService.add(sessionId, req.user!.id, body)
-    res.status(201).json({ item })
-  }),
-
-  // update, remove, etc.
-}
+export const searchProduct = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { query } = req.query;
+    // ... lógica de búsqueda con detección GS1 y join contra siesa
+    res.json(results);
+  } catch (error: any) {
+    console.error('Error in searchProduct:', error);
+    res.status(500).json({ error: 'Internal server error', detail: error.message });
+  }
+};
 ```
 
-### `items.service.ts`
+> Los controllers hoy hacen **todo**: parsean query/body, llaman a Supabase, formatean response y manejan errores. La separación en `service` + `repository` queda como roadmap.
 
-Lógica de negocio, sin tocar `req`/`res`.
-
-```typescript
-import { itemsRepository } from './items.repository'
-import { sessionsRepository } from '../sessions/sessions.repository'
-import { ConflictError, NotFoundError } from '../../shared/errors'
-import { logAudit } from '../../shared/middleware/audit'
-
-export const itemsService = {
-  async add(sessionId: string, userId: string, input: AddItemInput) {
-    const session = await sessionsRepository.findById(sessionId)
-    if (!session) throw new NotFoundError('session')
-    if (session.estado !== 'abierta') throw new ConflictError('session-not-editable')
-    if (session.vip_user_id !== userId) throw new ForbiddenError()
-
-    const item = await itemsRepository.insert({ session_id: sessionId, ...input })
-    await sessionsRepository.bumpItemCount(sessionId, 1)
-    await logAudit({ session_id: sessionId, user_id: userId, action: 'item.added', payload: { item_id: item.id, ...input } })
-    return item
-  },
-}
-```
-
-### `items.repository.ts`
-
-Queries puras a Supabase. **No hay lógica de negocio acá.**
-
-```typescript
-import { supabase } from '../../shared/db/supabase'
-
-export const itemsRepository = {
-  async insert(row: NewItem) {
-    const { data, error } = await supabase
-      .from('sf_items')
-      .insert(row)
-      .select()
-      .single()
-    if (error) throw error
-    return data
-  },
-
-  async findBySession(sessionId: string) {
-    const { data, error } = await supabase
-      .from('sf_items')
-      .select('*')
-      .eq('session_id', sessionId)
-      .order('created_at', { ascending: true })
-    if (error) throw error
-    return data
-  },
-
-  // update, delete, etc.
-}
-```
-
-### `items.schemas.ts`
-
-Schemas Zod. Acá viven los **contratos de la API**.
-
-```typescript
-import { z } from 'zod'
-
-const unidadMedidaSchema = z.enum(['KL', 'LB', '500GR', 'UND', 'P6'])
-
-const cantidadSchema = z.string().regex(/^\d+(\.\d{1,3})?$/, 'cantidad inválida')
-
-export const addItemBodySchema = z.object({
-  siesa_codigo: z.string().min(1),
-  unidad_medida: unidadMedidaSchema,
-  cantidad: cantidadSchema,
-  origen: z.enum(['scan_ean', 'scan_gs1', 'busqueda_manual']),
-  ean_escaneado: z.string().optional(),
-  metadata: z.record(z.unknown()).optional(),
-})
-
-export type AddItemInput = z.infer<typeof addItemBodySchema>
-```
-
-## Convenciones
+## Convenciones actuales
 
 ### Naming
-- Archivos: `kebab-case.ts` (excepto clases/componentes que pueden ser `PascalCase.ts` si exportan una clase principal).
+
+- Archivos: `kebab-case.ts` (ej. `catalog.controller.ts`).
 - Funciones, variables: `camelCase`.
 - Tipos, interfaces, clases: `PascalCase`.
-- Constantes globales: `SCREAMING_SNAKE_CASE`.
 - Tablas DB: `snake_case` con prefijo `sf_`.
-- Endpoints REST: `kebab-case` (`/sessions/:id/finalize`).
+- Endpoints REST: paths en kebab-case (`/sessions/checkout-direct`).
 
 ### TypeScript
-- `tsconfig.json` con `strict: false` al inicio (lo subimos a `true` cuando estés cómodo).
-- **Cero `any`.** Usar `unknown` si algo es realmente opaco.
-- `import type` para tipos:
-  ```typescript
-  import type { Session } from '../sessions/sessions.types'
-  ```
-- Inferí tipos desde Zod con `z.infer<typeof schema>` en vez de duplicar.
+
+- `tsconfig.json` con `strict: false`, `esModuleInterop: true`. Es lo que está cargado en el repo.
+- **Endurecer pendiente**: activar `noImplicitAny`, `strictNullChecks`, y eventualmente `strict: true`.
 
 ### Errores
-- **No usar `console.error` en código de producción.** Usar `logger.error(...)`.
-- Lanzar instancias de `AppError` y subclases. El middleware global las mapea a JSON.
-- En el catch global, errores no controlados se loguean con stack y se devuelven como `500 internal-error`.
 
-### Async/await
-- **Nunca** mezclar promesas con callbacks.
-- Wrappers: usar `asyncHandler` para que los controllers async no necesiten try/catch.
+- Cada controller usa `try/catch` + `console.error` + `res.status(500).json({ error })`.
+- **No hay middleware global** de errores ni clases tipadas. Pendiente refactor.
 
-### Logs (Pino)
-- Niveles: `trace`, `debug`, `info`, `warn`, `error`.
-- Cada request tiene un `requestId` (uuid) que se inyecta al logger.
-- Logs estructurados (JSON), no strings concatenados.
+### Logs
 
-## `tsconfig.json` recomendado para arrancar
+- `morgan('dev')` para HTTP en consola.
+- `console.error` en catches.
+- **No hay Pino ni logs estructurados.** Pendiente.
+
+### Tests
+
+- **No hay tests.** No hay `vitest.config.ts` ni archivos `*.test.ts`.
+
+## `tsconfig.json` actual
 
 ```json
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "outDir": "dist",
-    "rootDir": "src",
+    "module": "CommonJS",
+    "outDir": "./dist",
+    "rootDir": "./src",
     "strict": false,
-    "noImplicitAny": true,
-    "strictNullChecks": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true,
-    "declaration": false
+    "resolveJsonModule": true
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "tests"]
+  "include": ["src/**/*"]
 }
 ```
 
-> Empezamos con `strict: false` pero `noImplicitAny: true` y `strictNullChecks: true`. Eso te da los chequeos más útiles sin volverte loco con los tipos exactos. Cuando estés cómodo, subimos `strict: true`.
-
-## Cómo agregar un módulo nuevo
-
-1. Crear carpeta `src/modules/<nombre>/`
-2. Crear los 5 archivos: `routes`, `controller`, `service`, `repository`, `schemas`
-3. Si el módulo tiene tablas propias, agregarlas a `supabase/migrations/`
-4. Montar el router en `src/app.ts`:
-   ```typescript
-   app.use('/api/sf/<nombre>', <nombre>Router)
-   ```
-5. Crear tests en `tests/integration/<nombre>.test.ts`
-6. Documentar los endpoints en `docs/03-api.md`
-
-## `package.json` esperado
+## `package.json` actual
 
 ```json
 {
-  "name": "backend-sin-filas",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
+  "name": "backend-sinfilas",
+  "version": "1.0.0",
   "scripts": {
-    "dev": "tsx watch src/server.ts",
+    "dev": "nodemon src/server.ts",
     "build": "tsc",
-    "start": "node dist/server.js",
-    "test": "vitest",
-    "test:run": "vitest run",
-    "typecheck": "tsc --noEmit",
-    "lint": "eslint src tests"
+    "start": "node dist/server.js"
   },
+  "type": "commonjs",
   "dependencies": {
-    "@supabase/supabase-js": "^2.x",
-    "express": "^5.x",
-    "pino": "^9.x",
-    "pino-http": "^10.x",
-    "zod": "^4.x"
+    "@supabase/supabase-js": "^2.105.4",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "helmet": "^8.1.0",
+    "morgan": "^1.10.1",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@types/express": "^5.x",
-    "@types/node": "^22.x",
-    "tsx": "^4.x",
-    "typescript": "^5.x",
-    "vitest": "^2.x"
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/morgan": "^1.9.10",
+    "@types/node": "^25.6.2",
+    "nodemon": "^3.1.14",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3"
   }
 }
 ```
 
-## `.env.example`
+## Variables de entorno (.env)
 
-```env
-PORT=3001
-NODE_ENV=development
-LOG_LEVEL=info
+| Variable | Uso | Requerida |
+|---|---|---|
+| `PORT` | Puerto local (default 3000) | No |
+| `NODE_ENV` | `development` o `production` | No |
+| `SUPABASE_URL` | URL del proyecto Supabase | **Sí** |
+| `SUPABASE_KEY` | Service role key (bypassa RLS) | **Sí** |
+| `SUPABASE_JWT_SECRET` | Secret para validar JWT de Supabase (uso futuro) | No (hoy no se usa) |
+| `QR_SIGNING_SECRET` | Secret para firmar tokens HMAC (uso futuro) | No (hoy no se usa) |
 
-SUPABASE_URL=
-SUPABASE_KEY=
-SUPABASE_JWT_SECRET=
+> `env.ts` valida estas variables con Zod al arrancar. Si falta `SUPABASE_URL` o `SUPABASE_KEY`, el proceso muere antes de levantar el server.
 
-QR_SIGNING_SECRET=
-QR_TTL_MINUTES=15
+## Cómo agregar un módulo nuevo (hoy)
+
+1. Crear carpeta `src/modules/<nombre>/`
+2. Crear `<nombre>.route.ts` y `<nombre>.controller.ts`
+3. Montar el router en `src/app.ts`:
+   ```ts
+   import nombreRoutes from './modules/<nombre>/<nombre>.route';
+   app.use('/api/sf/<nombre>', nombreRoutes);
+   ```
+4. Documentar los endpoints en `docs/03-api.md`.
+5. Si requiere nuevas tablas, sumarlas a `docs/06-supabase-setup.sql`.
+
+## Roadmap de estructura (lo que queremos pero no está)
+
 ```
+src/
+├── modules/
+│   ├── auth/                     ← verifyJwt middleware + requireRole
+│   │   ├── auth.route.ts
+│   │   ├── auth.controller.ts
+│   │   ├── auth.middleware.ts
+│   │   └── auth.schemas.ts
+│   │
+│   ├── catalog/
+│   │   ├── catalog.route.ts
+│   │   ├── catalog.controller.ts
+│   │   ├── catalog.service.ts    ← extraer lógica
+│   │   ├── catalog.repository.ts ← queries puras a Supabase
+│   │   └── catalog.schemas.ts    ← Zod del query string + response shape
+│   │   (mismo patrón para sessions y admin)
+│   │
+│   └── ...
+│
+├── shared/
+│   ├── db/
+│   ├── errors/                   ← AppError + subclases (NotFound, Validation, etc.)
+│   ├── middleware/
+│   │   ├── errorHandler.ts       ← maps AppError → JSON
+│   │   ├── requestId.ts
+│   │   └── auditWriter.ts        ← logAudit(action, payload) hacia sf_audit_log
+│   ├── barcode/
+│   │   └── gs1.ts                ← parseGS1 (copiado del picking)
+│   ├── units/
+│   │   └── weighableUnits.ts
+│   └── logger/
+│       └── logger.ts             ← Pino instance
+│
+└── tests/
+    ├── unit/
+    └── integration/
+```
+
+## Convenciones que queremos adoptar (lecciones del picking)
+
+| Práctica | Estado actual | Estado deseado |
+|---|---|---|
+| Capas `route → controller → service → repository` | Sólo `route → controller` | Las 4 capas |
+| Validación Zod en bodies | Sólo en `env.ts` | En todos los inputs |
+| Errores tipados + middleware central | No | `AppError` + subclases + middleware al final del pipeline |
+| `console.error` | Sí | Logger Pino con niveles |
+| `tsconfig` strict | `false` | Al menos `noImplicitAny` + `strictNullChecks` |
+| Tests | Ninguno | Vitest con tests unitarios e integración |
+| Audit log con cola | No | Inserción en transacción cuando sea posible |
+
+Cuando se haga el refactor, ir un módulo a la vez (empezar por el de mayor riesgo: `sessions/checkout-direct`).

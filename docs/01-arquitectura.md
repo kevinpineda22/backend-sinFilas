@@ -2,134 +2,143 @@
 
 ## Visión
 
-Sin Filas es una herramienta interna de **agilización de fila**. Un empleado VIP (de confianza) asiste a un cliente en la fila, escanea o busca los productos de su carrito, y al terminar genera un QR que la caja lee para cargar todo de golpe en el POS.
+Sin Filas es una herramienta interna de **agilización de fila**. Un empleado (de confianza) asiste a un cliente en la fila del supermercado, escanea o busca los productos de su carrito y, al terminar, **genera un QR localmente** que la caja lee para cargar todo de golpe al ticket del POS.
 
-**No reemplaza** la caja, no procesa pagos, no tiene precios visibles. Solo prepara el manifiesto de productos para que el cobro sea rápido.
+**No reemplaza** la caja. No procesa pagos. No muestra precios.
 
-## Diagrama de flujo
+## Decisión arquitectónica madre: Lazy Sync + QR local
+
+Dos elecciones definen todo el resto del sistema:
+
+1. **Lazy Sync.** El carrito no se sincroniza con el backend a cada acción. Se acumula en `localStorage` (Zustand persist) y viaja en un único `POST /sessions/checkout-direct` al finalizar.
+2. **QR generado en el frontend.** El string que entra al QR es exactamente el que el POS de la caja sabe leer (formato `QTY*CODE\r\n` + GS1 de 13 dígitos para pesables). El backend no firma ni codifica nada en el QR — solo persiste un token UUID de auditoría.
+
+Esas dos decisiones eliminan: latencia por scan, dependencia del backend en la fila, sincronización de catálogo con el POS, y validación remota desde la caja.
+
+## Diagrama del sistema real
 
 ```
-┌──────────────┐   1. login OTP/email      ┌───────────────────┐
-│ Empleado VIP │──────────────────────────▶│  Supabase Auth    │
-│   (mobile)   │   (rol = cliente_vip)     │  + tabla profiles │
-└──────┬───────┘                           └───────────────────┘
-       │
-       │ 2. POST /sf/sessions  (crea sesión vacía)
-       ▼
+┌────────────────────────┐
+│  Frontend (sinFilas)   │      Frontend embebido en Pagina-web_React
+│  - SFApp (escáner +    │      Reusa EscanerBarras del picking.
+│    carrito + QR)       │      Carrito en Zustand persist (localStorage).
+│  - AdminDashboard      │      QR generado con qrcode.react.
+└────────┬───────────────┘
+         │
+         │ Axios + Bearer token
+         │ (interceptor en sfApi.js — token Supabase no validado por backend hoy)
+         ▼
 ┌──────────────────────────────────────────────────────────────┐
-│                  Backend Sin Filas (Express)                  │
-│                                                                │
-│  modules/                                                      │
-│   ├─ auth     (verifica JWT + rol)                            │
-│   ├─ catalog  (búsqueda por nombre / EAN / SKU)               │
-│   ├─ sessions (crear, listar, finalizar)                      │
-│   ├─ items    (agregar / quitar / editar)                     │
-│   └─ checkout (generar QR firmado, redeem)                    │
-└────────┬───────────────────────────────────┬─────────────────┘
-         │                                   │
-         │ tablas sf_*                       │ tablas reusadas
-         ▼                                   ▼
-   ┌──────────────┐                  ┌────────────────────┐
-   │ sf_sessions  │                  │ siesa_codigos_     │
-   │ sf_items     │                  │   barras           │
-   │ sf_qr_tokens │                  │ wc_sedes           │
-   │ sf_audit_log │                  │ profiles           │
-   └──────────────┘                  └────────────────────┘
+│         Backend Sin Filas (Express 5 + TS, en Vercel)        │
+│                                                              │
+│  src/modules/                                                │
+│   ├─ catalog    GET /catalog/search                          │
+│   ├─ sessions   POST /sessions/checkout-direct               │
+│   └─ admin      GET /admin/{stats, sessions, users}          │
+│                                                              │
+│  src/shared/db/supabaseClient.ts (service_role)              │
+└────────┬─────────────────────────────────────────────────────┘
+         │
+         │ Service role key (bypassa RLS)
+         ▼
+┌─────────────────────────────────────────────────────────────┐
+│             Supabase (PostgreSQL compartido con picking)     │
+│                                                              │
+│  Tablas sf_*:                                                │
+│   - sf_sessions       (ENUM sf_session_state)                │
+│   - sf_session_items                                         │
+│   - sf_qr_tokens      (used_at = null hasta que POS confirme)│
+│   - sf_audit_log      (existe, sin escritura aún)            │
+│                                                              │
+│  Tablas reusadas (sólo lectura):                             │
+│   - profiles (user_id, nombre, correo, role)                 │
+│   - wc_sedes                                                 │
+│   - items_siesa + siesa_codigos_barras                       │
+│   - role_permissions                                         │
+└─────────────────────────────────────────────────────────────┘
 
-   3. agregar items (scan / búsqueda) → sf_items
-   4. POST /sf/sessions/:id/finalize → genera token QR
-   5. caja escanea QR → POST /sf/checkout/redeem → devuelve manifiesto
+                         ║
+              No hay conexión backend ↔ POS (todavía).
+              El POS lee la string cruda del QR y no llama al backend.
+                         ║
+
+┌────────────────────────┐
+│  POS de la caja        │      Lee QR como texto plano:
+│  (sistema externo)     │      "3*7700001234\r\n2998765..."
+└────────────────────────┘      Mismo formato que el picking.
 ```
 
-## Módulos del backend
+## Módulos del backend (estado real)
 
-| Módulo | Responsabilidad |
-|---|---|
-| `auth` | Verifica JWT de Supabase, valida que el rol sea `cliente_vip` o superior. Middleware. |
-| `catalog` | Búsqueda de productos por nombre, EAN, SKU. Devuelve presentaciones disponibles (`unidad_medida`). |
-| `sessions` | CRUD de sesiones de carrito. Estados: `abierta` → `finalizada` → `cobrada` / `cancelada`. |
-| `items` | Agregar, editar (cantidad/peso), quitar items de una sesión abierta. |
-| `checkout` | Generar QR firmado al finalizar. Endpoint de redeem para la caja. |
-
-Cada módulo se estructura como `route → controller → service → repository`. Detalle en [`05-estructura-codigo.md`](05-estructura-codigo.md).
-
-## Stack y razones
-
-| Capa | Elección | Por qué |
+| Módulo | Endpoint | Responsabilidad |
 |---|---|---|
-| Runtime | Node.js | Lo que el equipo maneja |
-| Framework | Express 5 | Ya lo usan en picking, cero curva de aprendizaje |
-| Lenguaje | TypeScript | Caza errores en build time. La diferencia con el picking en JS la vamos a sentir desde el primer mes. |
-| Validación | Zod | Schemas que sirven para validar runtime Y derivar tipos TS |
-| DB | Supabase (PostgreSQL) | Mismo proyecto que picking — usuarios, sedes, barcodes ya existen |
-| Auth | Supabase Auth (JWT) | Reuso total, solo agregamos un rol |
-| Tests | Vitest | Mismo runner que picking |
-| Deploy | Vercel | Mismo provider, mismo workflow |
+| `catalog` | `GET /catalog/search` | Busca productos por texto, EAN o GS1-128. Detecta peso embebido en GS1 (prefijo `29`). Agrupa por `f120_id` con presentaciones (`unidad_medida` + `requiere_peso`). |
+| `sessions` | `POST /sessions/checkout-direct` | Recibe el carrito completo, inserta sesión + items + token UUID. Una sola llamada por sesión. |
+| `admin` | `GET /admin/stats` `GET /admin/sessions` `GET /admin/users` | Datos para el dashboard administrativo (KPIs, historial, usuarios). |
+| `health` | `GET /health` | Health check para Vercel. |
 
-## Lecciones del picking que aplicamos
+### Módulos del plan inicial que NO existen (y por qué)
 
-Esto NO es opcional. Son las cosas que en `backend-woocommerce` arrastramos como deuda y acá no repetimos:
+Los borramos al pivotear a Lazy Sync:
 
-### 1. TypeScript desde día 1
-En picking, errores como `id_picker undefined` o `body sin productId` los descubrís en producción. Acá los caza el compilador.
+| Módulo eliminado | Por qué no se necesitó |
+|---|---|
+| `auth` (verifyJwt + requireRole) | Hoy no hay auth real. Cualquier empleado con la URL puede entrar. Pendiente reintegrar como middleware. |
+| `items` (CRUD por item) | El frontend acumula el carrito local y manda todo de una en `checkout-direct`. No hay edición remota. |
+| `checkout/redeem` (POS valida QR contra backend) | El POS lee la string cruda del QR sin pasar por el backend. |
 
-### 2. Validación en el border con Zod
-Ningún controller recibe datos sin validar. Cero `req.body.algo` confiando que está bien tipado.
+## Stack
 
-### 3. Sin código duplicado entre frontend y backend
-`manifestPricing.js` está duplicado en `utils/` (CommonJS) y `ecommerce/shared/` (ESM) en picking. Acá los schemas Zod del backend se exportan y el frontend los consume tipados (cuando migremos el front a TS) o como referencia documental (mientras siga en JS).
-
-### 4. Variables de entorno, NUNCA URLs hardcodeadas
-En picking, `ecommerceApi.js` tiene la URL de Vercel hardcodeada. Acá usamos `import.meta.env.VITE_SF_API_URL` o equivalente.
-
-### 5. Sin caches en memoria en serverless
-`wooMultiService` tiene caches con TTL en memoria. En Vercel cada invocación es proceso nuevo: el cache **no sirve**. Acá: si necesitamos cachear, lo hacemos en DB (con `expires_at`) o no cacheamos.
-
-### 6. Capas separadas: route → controller → service → repository
-En picking los controllers hacen de todo (validar, llamar a Supabase, llamar a Woo, formatear respuesta). Acá:
-
-- **route**: define método + path, monta middlewares, llama al controller
-- **controller**: parsea con Zod, llama al service, formatea response
-- **service**: lógica de negocio, orquesta repositorios y servicios externos
-- **repository**: queries a Supabase, encapsula la forma de la tabla
-
-### 7. Errores tipados y middleware global
-En picking hay `try/catch` con `console.error` en cada controller. Acá:
-
-- Clases de error (`NotFoundError`, `UnauthorizedError`, `ValidationError`, `ConflictError`)
-- Un único middleware al final del pipeline que mapea error → status + body JSON
-
-### 8. Logs estructurados con Pino
-Reemplazamos `console.log` por logger con niveles, request ID y contexto. En Vercel los logs estructurados son buscables.
-
-### 9. Tests en `tests/` separados, NO al lado del código
-En picking los `.test.js` viven al lado del archivo. Funciona pero ensucia la lectura del módulo. Acá: `tests/<modulo>/<archivo>.test.ts`.
-
-### 10. Audit log con cola, no fire-and-forget
-`auditService.js` en picking es fire-and-forget: si Supabase está caído, perdés el evento. Acá los eventos críticos se insertan **dentro de la misma transacción** que la operación principal cuando es posible, o con reintento explícito.
+| Capa | Elección |
+|---|---|
+| Runtime | Node.js |
+| Framework | Express 5 |
+| Lenguaje | TypeScript (con `strict: false` — pendiente de endurecer) |
+| Validación | Zod (sólo en `config/env.ts`; pendiente extender a bodies) |
+| DB | Supabase (PostgreSQL) — mismo proyecto que picking |
+| Auth | Supabase Auth (JWT) — **no validado en backend hoy** |
+| Frontend | React 19 + Vite (embebido en Pagina-web_React) |
+| Estado FE | Zustand 5 (cart con `persist`) |
+| QR | `qrcode.react` |
+| Cámara | `EscanerBarras` reutilizado del picking |
+| Deploy | Vercel (serverless, `maxDuration: 30s`) |
 
 ## Reuso del backend de WooCommerce
 
-Lo que **copiamos** (en `src/shared/`):
+Lo que **compartimos por convención**:
 
-- `barcode/gs1Utils.ts` — parsing GS1-128 (prefijo 29 = peso variable de carnicería)
-- `barcode/barcodeFilter.ts` — clasificación de tipos de barcode
-- `pricing/manifestPricing.ts` — cálculo de cargo por línea (lo dejamos por si lo necesitamos para validaciones)
-- `units/weighableUnits.ts` — clasificación KL/LB/500GR/UND
+- Mismo proyecto Supabase (tablas existentes: `profiles`, `wc_sedes`, `items_siesa`, `siesa_codigos_barras`, `role_permissions`).
+- Mismo lector de QR del POS (formato del manifiesto del picking).
+- Mismo componente `EscanerBarras` del frontend.
 
-Lo que **NO copiamos** (no aplica al alcance):
+Lo que **NO reutilizamos**:
 
-- WooCommerce REST client — Sin Filas no habla con WooCommerce
-- Sede service multi-tenant complejo — usamos un único campo `sede_id` por sesión
-- Sync service — no hay sync, el manifiesto va directo al QR
+- WooCommerce REST client (Sin Filas no habla con Woo).
+- Sede service multi-tenant del picking (Sin Filas usa solo `sede_id` plano por sesión).
+- Servicios de sync (no hay sync — el QR va directo al POS).
 
-## Lo que no entra en v1
+## Lecciones del picking que (todavía) NO aplicamos
 
-Para evitar scope creep, estas cosas las dejamos para fases siguientes:
+Estas las teníamos como objetivos al diseñar Sin Filas, pero el código actual aún no las cumple. Listadas para resolverlas en próximas iteraciones:
 
-- App para el cliente común (auto-scan)
-- Sync de catálogo desde WooCommerce
-- Reportes y analytics
-- Notificaciones push
-- Modo offline robusto (la v1 asume conexión, fallback básico en IndexedDB)
-- Identificación del cliente final (cédula, lealtad, cupones)
+| Objetivo | Estado |
+|---|---|
+| Capas separadas `route → controller → service → repository` | Parcial. Tenemos `route → controller` que hacen todo. Falta `service` y `repository`. |
+| Validación Zod en bodies | Pendiente. Sólo `env.ts` usa Zod. |
+| Errores tipados + middleware central | Pendiente. Cada controller hace su `try/catch + res.status(500)`. |
+| Logs estructurados (Pino) | Pendiente. Hoy `console.error` y `morgan` para HTTP. |
+| Tests con Vitest | Pendiente. No hay configuración ni archivos. |
+| `tsconfig` strict | Pendiente. `strict: false` (algunos null checks se escapan). |
+| Audit log conectado | Pendiente. Tabla creada, código no la usa. |
+
+## Lo que NO entra en v1
+
+Para evitar scope creep:
+
+- App para el cliente común (auto-scan).
+- Sync de catálogo desde WooCommerce.
+- Reportes avanzados / heatmaps.
+- Notificaciones push.
+- Modo offline robusto con queue de reintento (la v1 asume conexión al hacer el `checkout-direct`).
+- Identificación del cliente final (cédula, lealtad, cupones).
+- Validación del QR contra backend desde el POS (depende del equipo del POS).

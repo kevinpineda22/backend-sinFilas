@@ -1,259 +1,242 @@
-# 04 — Flujos del sistema
+# 04 — Flujos del sistema (Lazy Sync)
 
-Diagramas detallados de los flujos críticos.
+Diagramas de los flujos críticos como están implementados HOY.
+
+> El plan inicial usaba un flujo per-item (cada scan iba al backend). El proyecto pivoteó a **Lazy Sync**: el carrito se acumula 100% en el frontend y solo viaja al backend al finalizar.
 
 ---
 
-## Flujo 1 — Sesión completa (happy path)
+## Flujo 1 — Sesión completa (happy path real)
 
 ```
-VIP                Frontend            Backend SF           Supabase           Caja
- │                    │                    │                    │                │
- │ 1. login           │                    │                    │                │
- │───────────────────▶│                    │                    │                │
- │                    │ POST /auth/me      │                    │                │
- │                    │───────────────────▶│ valida JWT + rol   │                │
- │                    │                    │───────────────────▶│                │
- │                    │◀───────────────────│ user + permisos    │                │
- │                    │                    │                    │                │
- │ 2. "Iniciar carrito" │                  │                    │                │
- │───────────────────▶│ POST /sessions     │                    │                │
- │                    │───────────────────▶│ INSERT sf_sessions │                │
- │                    │                    │───────────────────▶│                │
- │                    │◀───────────────────│ session.id         │                │
- │                    │                    │                    │                │
- │ 3. escanea o busca │                    │                    │                │
- │   producto         │                    │                    │                │
- │───────────────────▶│ GET /catalog/lookup│                    │                │
- │                    │───────────────────▶│ SELECT desde       │                │
- │                    │                    │  siesa_codigos_    │                │
- │                    │                    │  barras            │                │
- │                    │◀───────────────────│ producto resuelto  │                │
- │                    │                    │                    │                │
- │   (si fruver →     │                    │                    │                │
- │    modal de peso)  │                    │                    │                │
- │                    │                    │                    │                │
- │                    │ POST /items        │                    │                │
- │                    │───────────────────▶│ INSERT sf_items    │                │
- │                    │◀───────────────────│ item creado        │                │
- │                    │                    │                    │                │
- │   (repetir 3 N veces)                   │                    │                │
- │                    │                    │                    │                │
- │ 4. "Finalizar"     │                    │                    │                │
- │───────────────────▶│ POST /sessions/:id │                    │                │
- │                    │   /finalize        │                    │                │
- │                    │───────────────────▶│ UPDATE estado      │                │
- │                    │                    │ + INSERT qr_token  │                │
- │                    │                    │ (HMAC firmado)     │                │
- │                    │◀───────────────────│ token + ttl        │                │
- │                    │ renderiza QR       │                    │                │
- │                    │                    │                    │                │
- │ 5. cliente va a caja con celular mostrando QR              │                  │
- │                                                            ▼                  │
- │                                                  6. caja escanea QR           │
- │                                                            │                  │
- │                                                            │ POST /checkout/  │
- │                                                            │   redeem         │
- │                                                            │─────────────────▶│
- │                                                            │ valida HMAC      │
- │                                                            │ + UPDATE         │
- │                                                            │   redeemed_at    │
- │                                                            │◀─────────────────│
- │                                                            │ manifiesto       │
- │                                                            │                  │
- │                                                  7. POS carga items y cobra   │
+VIP                 Frontend (sinFilas)        Backend SF          Supabase           Caja POS
+ │                       │                          │                    │                │
+ │ 1. abre /sin-filas    │                          │                    │                │
+ │──────────────────────▶│                          │                    │                │
+ │                       │ (no hay endpoint /me;    │                    │                │
+ │                       │  cualquier empleado      │                    │                │
+ │                       │  con la URL puede entrar)│                    │                │
+ │                       │                          │                    │                │
+ │ 2. escanea o busca    │                          │                    │                │
+ │──────────────────────▶│ GET /catalog/search      │                    │                │
+ │                       │─────────────────────────▶│ JOIN items_siesa + │                │
+ │                       │                          │ siesa_codigos_     │                │
+ │                       │                          │ barras WHERE active│                │
+ │                       │                          │───────────────────▶│                │
+ │                       │◀─────────────────────────│ productos agrupados│                │
+ │                       │                          │  por f120_id       │                │
+ │                       │                          │                    │                │
+ │   (si fruver →        │                          │                    │                │
+ │    modal de peso)     │                          │                    │                │
+ │                       │ addItem() al cartStore   │                    │                │
+ │                       │ (Zustand persist)        │                    │                │
+ │                       │                          │                    │                │
+ │   (repetir 2 N veces, todo offline-friendly)     │                    │                │
+ │                       │                          │                    │                │
+ │ 3. "Finalizar y       │                          │                    │                │
+ │     Generar QR"       │                          │                    │                │
+ │──────────────────────▶│ genera raw QR string     │                    │                │
+ │                       │ con generateManifestQR-  │                    │                │
+ │                       │ Value(items)             │                    │                │
+ │                       │                          │                    │                │
+ │                       │ POST /sessions/          │                    │                │
+ │                       │      checkout-direct     │                    │                │
+ │                       │─────────────────────────▶│ INSERT sf_sessions │                │
+ │                       │                          │  (estado=          │                │
+ │                       │                          │   'finalizado')    │                │
+ │                       │                          │ INSERT sf_session_ │                │
+ │                       │                          │  items (N filas)   │                │
+ │                       │                          │ INSERT sf_qr_tokens│                │
+ │                       │                          │  (uuid, no expira) │                │
+ │                       │                          │───────────────────▶│                │
+ │                       │◀─────────────────────────│ { session_id,      │                │
+ │                       │                          │   success: true }  │                │
+ │                       │                          │                    │                │
+ │                       │ pinta QR con             │                    │                │
+ │                       │ <QRCodeSVG value=        │                    │                │
+ │                       │  rawQrValue>             │                    │                │
+ │                       │                          │                    │                │
+ │ 4. cliente va a caja con el celular mostrando el QR                   │                │
+ │                                                                       ▼                │
+ │                                                              5. POS escanea QR         │
+ │                                                                       │                │
+ │                                                                       │ lee el string  │
+ │                                                                       │ crudo:         │
+ │                                                                       │ "3*7700001234  │
+ │                                                                       │  \r\n          │
+ │                                                                       │  2998765012345"│
+ │                                                                       │                │
+ │                                                              6. POS carga al ticket    │
+ │                                                                 línea por línea y cobra│
 ```
+
+**Diferencia crítica con el plan original:**
+
+- El QR **NO contiene un token** que la caja resuelve contra el backend. Contiene **el manifiesto crudo** que el POS sabe leer (formato `QTY*CODE\r\n` o GS1 de 13 dígitos directo).
+- El token en `sf_qr_tokens` es un UUID de auditoría: queda guardado pero la caja no lo usa.
+- No hay endpoint que el POS llame de vuelta. La caja no se entera del backend de Sin Filas.
 
 ---
 
 ## Flujo 2 — Producto carnicería (etiqueta GS1-128)
 
-Carnicería pesa el producto en mostrador, imprime una etiqueta con código GS1-128 que codifica:
+Carnicería pesa el producto y lo etiqueta con un código GS1-128 que codifica:
 
 - Prefijo `29` (peso variable)
 - Código del producto (5 dígitos)
 - Peso en gramos (5 dígitos)
-- Check digit
+- Check digit (1 dígito)
 
-Ejemplo: `29` + `98765` + `01234` + `5` = `29987650123 45`
+Ejemplo: `29` + `98765` + `01234` + `5` = `29987650123 45` (13 chars).
 
-### Flujo
+### Flujo real
 
 ```
-1. VIP escanea etiqueta de carnicería con la cámara
-2. Frontend → GET /catalog/lookup?barcode=29987650123 45
-3. Backend detecta prefijo "29" → llama a gs1Utils.parseGS1()
-4. Extrae:
-     - siesa_codigo = "98765"
-     - peso_gramos  = 1234
-5. Resuelve producto en siesa_codigos_barras WHERE f120_id = '98765'
-6. Devuelve:
-     {
-       tipo: "gs1",
-       producto: { siesa_codigo: "98765", descripcion: "CARNE RES", unidad_medida: "KL" },
-       peso_extraido_kg: 1.234
-     }
-7. Frontend muestra confirmación: "CARNE RES — 1.234 kg" → [Agregar]
-8. POST /items con cantidad="1.234", origen="scan_gs1"
+1. VIP escanea con la cámara (EscanerBarras del picking)
+2. SFApp.handleScan(decodedText) → llama a searchCatalog(decodedText)
+3. Backend en catalog.controller.ts:
+     - detecta que arranca con "29" y tiene 13 chars
+     - extrae searchCode = "29" + chars 3..7   (ej. "2998765")
+     - extrae parsedGs1Weight = chars 8..12 / 1000   (ej. 1.234 kg)
+     - busca presentaciones que matcheen "2998765%"
+     - devuelve el producto con scanned_quantity=1.234, isGs1=true
+4. Frontend ve isGs1 → llama addItemToCart() directamente sin modal
+     - codigo_barras que se guarda: el GS1 completo escaneado (los 13 chars)
+     - cantidad: el peso embebido
+5. Se acumula en el carrito local.
 ```
 
 **Sin modal de peso.** El peso ya viene en el código.
 
 ---
 
-## Flujo 3 — Producto fruver (sin etiqueta, con báscula digital)
+## Flujo 3 — Producto fruver (sin etiqueta, con báscula)
 
-La báscula del fruver muestra el peso en pantalla pero **no imprime etiqueta**. El empleado tiene que leer la pantalla y tipear.
+La báscula del fruver muestra el peso en pantalla pero **no imprime etiqueta**. El VIP tiene que leer la pantalla y tipear.
 
-### Flujo
+### Flujo real
 
 ```
-1. VIP toca la lupa y busca: "mango"
-2. Frontend → GET /catalog/search?q=mango
-3. Backend devuelve presentaciones agrupadas:
+1. VIP toca la lupa → SFManualSearch → tipea "mango"
+2. Frontend → GET /catalog/search?query=mango
+3. Backend devuelve:
      [
        {
-         siesa_codigo: "12345",
-         descripcion: "MANGO TOMMY",
+         f120_id: "12345",
+         nombre: "MANGO TOMMY",
          presentaciones: [
-           { unidad_medida: "KL",  requiere_peso: true  },
-           { unidad_medida: "UND", requiere_peso: false }
+           { codigo_barras: "2912345",       unidad_medida: "KL",  requiere_peso: true  },
+           { codigo_barras: "7700001234567", unidad_medida: "UND", requiere_peso: false }
          ]
        }
      ]
-4. Frontend muestra:
-     ┌───────────────────────────┐
-     │ MANGO TOMMY               │
-     │ ¿Cómo lo lleva?           │
-     │  [ Por kilo ]             │
-     │  [ Por unidad ]           │
-     └───────────────────────────┘
-5a. Si elige "Por unidad":
-     Modal de cantidad → "¿Cuántas unidades?" → tipea "3" → [Agregar]
-     POST /items { unidad_medida: "UND", cantidad: "3", origen: "busqueda_manual" }
-5b. Si elige "Por kilo":
-     Modal de peso → "Peso de la báscula (kg):" → tipea "0.480" → [Agregar]
-     Validación: 0 < cantidad <= 50  (alerta si fuera de rango)
-     POST /items { unidad_medida: "KL", cantidad: "0.480", origen: "busqueda_manual" }
+4. SFPresentationModal muestra las opciones:
+     ┌────────────────────────────┐
+     │ MANGO TOMMY                │
+     │  ┌────────────────────┐    │
+     │  │ KL (Pesar)         │    │
+     │  └────────────────────┘    │
+     │  ┌────────────────────┐    │
+     │  │ UND                │    │
+     │  └────────────────────┘    │
+     └────────────────────────────┘
+5a. Si elige UND → addItemToCart() directo con cantidad=1.
+5b. Si elige KL (requiere_peso) → SFWeightModal:
+     - input numérico, step="0.001", min="0.001"
+     - VIP tipea "0.480"
+     - Submit → generateGs1Barcode("2912345", 0.480) genera el GS1 final
+     - addItemToCart() con codigo_barras GS1 + cantidad=0.480
 ```
 
-### Reglas del modal de peso
+### Reglas del modal de peso (estado real)
 
-- Input numérico, decimal con punto (NO coma — luego mostramos según locale)
-- Hasta 3 decimales
-- Botones rápidos `0.250`, `0.500`, `1.000` para presets comunes
-- Si peso > 30 kg → warning amarillo, requiere confirmación extra
-- Si peso > 50 kg → bloqueado, error
-- Si peso = 0 → bloqueado
-
-### Edge cases
-
-| Caso | Comportamiento |
+| Caso | Comportamiento real |
 |---|---|
-| Producto solo se vende por unidad (no tiene `KL`) | Modal de unidad directo, no preguntamos |
-| Producto solo se vende por peso | Modal de peso directo |
-| Producto tiene `500GR` (medio kilo fijo) | Modal de cantidad de "medios kilos" → multiplica internamente |
-| Empleado se equivoca en el peso | Edita desde la lista de items: tap en el item → cambiar cantidad |
+| Validación mínima | `min="0.001"`, `required` |
+| Validación máxima | No hay tope superior. **Pendiente.** |
+| Decimales | `step="0.001"` (3 decimales) |
+| Botones rápidos (0.250, 0.500, 1.000) | No implementado. **Pendiente.** |
+| Edición de peso después de agregar | Hay que eliminar y volver a agregar. No hay PATCH. |
 
 ---
 
-## Flujo 4 — Producto seco con código de barras estándar (EAN)
-
-Productos empacados con EAN-13 normal (arroz, gaseosa, etc.).
+## Flujo 4 — EAN clásico (productos secos)
 
 ```
 1. VIP escanea con la cámara
-2. Frontend → GET /catalog/lookup?barcode=7700001234567
-3. Backend detecta que NO empieza con "29" → busca en siesa_codigos_barras WHERE codigo_barras = '7700001234567'
-4. Devuelve { tipo: "ean", producto: { ..., unidad_medida: "UND", requiere_peso: false } }
-5. Frontend muestra: "ARROZ 500G — agregando 1 unidad" → [Confirmar] [+ otra]
-6. POST /items { unidad_medida: "UND", cantidad: "1", origen: "scan_ean" }
+2. SFApp.handleScan() → GET /catalog/search?query=7700001234567
+3. Backend NO detecta prefijo 29 → busca match exacto
+4. Devuelve el producto con sus presentaciones (sin isGs1)
+5. Si hay 1 sola presentación → SFApp.handlePresentationChoice() la usa directo
+6. Si no requiere peso → addItemToCart() con cantidad=1
+7. Si hay varias presentaciones → SFPresentationModal
 ```
 
-**Sin modal.** Scan = +1 unidad. Si quiere 3 → tres scans, o edita la cantidad después.
+**Sin modal.** Scan = +1 unidad. Si el producto YA está en el carrito y NO requiere peso → `cartStore` suma `cantidad += 1`.
 
 ---
 
-## Flujo 5 — Generación y validación del QR
-
-### Generación (al finalizar sesión)
+## Flujo 5 — Generación del QR (sin firma)
 
 ```
-1. Frontend → POST /sessions/:id/finalize
-2. Backend:
-   a. Valida que la sesión esté 'abierta' y tenga >= 1 item
-   b. UPDATE sf_sessions SET estado='finalizada', finalized_at=now()
-   c. Construye payload:
-        { v: 1, sid: "<session_id>", iat: <unix_now>, exp: <unix_now + 900> }
-   d. Firma con HMAC-SHA256 usando QR_SIGNING_SECRET:
-        token = base64url(payload) + "." + base64url(hmac)
-   e. INSERT sf_qr_tokens (session_id, token, expires_at)
-   f. INSERT sf_audit_log action='qr.generated'
-3. Devuelve { token, expires_at, ttl_seconds }
-4. Frontend renderiza QR con la string `token`
+1. VIP toca "Finalizar y Generar QR"
+2. SFApp.handleFinalize():
+   a. Llama a generateManifestQRValue(items) en gs1Utils.js:
+        - Para items pesables (KL/LB/500GR/250GR) o GS1: línea = codigo_barras
+        - Para items normales: línea = `${cantidad}*${codigo_barras}`
+        - Une todo con "\r\n"
+   b. Llama a finalizeCheckoutDirect(items, rawQrText)
+3. Backend en sessions.controller.ts:
+   a. INSERT sf_sessions (estado='finalizado')
+   b. INSERT sf_session_items (N filas)
+   c. INSERT sf_qr_tokens (token = crypto.randomUUID(), expires_at = '2099-12-31...')
+   d. (NO usa raw_qr_string ni lo guarda)
+4. Frontend pinta QRCodeSVG con value=rawQrText.
 ```
 
-### Validación (al redimir desde caja)
-
-```
-1. Caja → POST /checkout/redeem { token: "..." }
-2. Backend:
-   a. Parsea token: header.signature
-   b. Valida HMAC: si no coincide → 401 unauthorized
-   c. Decodifica payload, valida `exp` > now → si no → 409 token-expired
-   d. SELECT sf_qr_tokens WHERE token = ?
-      - Si no existe → 404 token-not-found (reemitido o falsificado)
-      - Si redeemed_at IS NOT NULL → 409 token-already-redeemed
-   e. SELECT sf_sessions WHERE id = payload.sid
-   f. SELECT sf_items WHERE session_id = payload.sid
-   g. UPDATE sf_qr_tokens SET redeemed_at = now() WHERE token = ?
-   h. UPDATE sf_sessions SET estado='cobrada', redeemed_at=now()
-   i. INSERT sf_audit_log action='qr.redeemed'
-   j. Devuelve manifiesto completo
-```
-
-**Por qué firma + DB y no solo firma:**
-
-- La firma garantiza que el token no fue falsificado.
-- La fila en `sf_qr_tokens` permite **single-use** (si solo confiamos en la firma, el mismo QR se podría redimir dos veces).
-- Permite invalidar tokens manualmente (re-finalize).
+> ⚠️ Las inserciones NO son transaccionales. Si falla items o token, queda la sesión huérfana en BD. Es un gap conocido.
 
 ---
 
-## Flujo 6 — Cancelación de sesión
+## Flujo 6 — Validación en la caja
 
-```
-1. VIP cancela desde el frontend
-2. Frontend → POST /sessions/:id/cancel
-3. Backend:
-   a. Valida estado = 'abierta'  (sino 409 session-not-editable)
-   b. UPDATE estado='cancelada', cancelled_at=now()
-   c. INSERT sf_audit_log action='session.cancelled'
-4. Items se mantienen en DB para auditoría (no DELETE).
-```
+Hoy NO existe endpoint de validación. El POS:
 
----
+1. Escanea el QR
+2. Recibe el string `"3*7700001234567\r\n2998765012345..."`
+3. Lo parsea internamente (el POS YA sabe leer este formato del picking)
+4. Carga las líneas en el ticket
+5. Cobra
 
-## Flujo 7 — Re-finalize (caso de error)
+**El backend de Sin Filas no se entera de que la caja procesó el QR.** La columna `sf_qr_tokens.used_at` queda en `null` para siempre, y el dashboard admin muestra todas las sesiones como "PENDIENTE".
 
-A veces el QR no se ve bien, o la caja necesita uno nuevo.
-
-```
-1. VIP toca "Generar QR de nuevo" (solo disponible si estado='finalizada' y NO 'cobrada')
-2. Frontend → POST /sessions/:id/finalize
-3. Backend:
-   a. Si estado='finalizada' y existe token NO redimido → invalida token anterior (DELETE o expires_at=now()) y emite uno nuevo
-   b. Si estado='cobrada' → 409 session-not-editable
-4. Devuelve nuevo token.
-```
+> Cuando se implemente `POST /sessions/:id/redeem` (o `POST /qr/redeem`), el POS le pegará al backend para marcar `used_at = now()` y mover la sesión a `estado='cobrado'`.
 
 ---
 
-## Casos NO manejados en v1 (documentados para fases futuras)
+## Flujos NO implementados (pendientes)
 
-| Caso | Decisión actual |
-|---|---|
-| El producto no está en `siesa_codigos_barras` | Mostramos error, sin alternativa. Futuro: pedir descripción manual y marcar para revisión. |
-| Conexión cae en medio de una sesión | El frontend guarda items en IndexedDB y reintenta cuando vuelve. Pendiente diseñar conflict resolution. |
-| Cliente cambia de opinión y devuelve productos en la caja | Lo maneja la caja en el POS, fuera del scope de Sin Filas. |
-| Detección de fraude (escaneos sospechosos) | Out of scope v1. El audit log permite revisar a posteriori. |
+| Flujo | Estado | Notas |
+|---|---|---|
+| Cancelación de sesión desde el dashboard | Pendiente | Falta endpoint y UI |
+| Edición de items después de agregar | Pendiente | Hoy solo se puede eliminar |
+| Sesión `en_proceso` con sync remoto | Pendiente | El default del ENUM es `en_proceso` pero no se usa hoy |
+| Marca de `cobrado` cuando la caja redime | Pendiente | El POS no llama al backend |
+| Modo offline real con IndexedDB | Parcial | Zustand persist guarda en localStorage; falta queue de reintento del POST |
+| Audit log de eventos | Pendiente | Tabla `sf_audit_log` existe pero nadie escribe |
+
+---
+
+## Cómo "se ve" el manifiesto QR final
+
+Para un carrito con 3 ARROZ 500G + 1 CARNE RES (1.234 kg) + 1 MANGO (0.480 kg):
+
+```
+3*7700001234567
+2998765012345 (carne GS1, peso embebido)
+2912345004806 (mango GS1 generado por el frontend)
+```
+
+(separados por `\r\n`)
+
+El POS reconoce las líneas con `*` como `cantidad*codigo` y las líneas que arrancan con `29` como GS1 pesable.

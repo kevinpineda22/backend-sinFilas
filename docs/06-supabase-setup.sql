@@ -1,53 +1,113 @@
 -- ==============================================================================
--- SCRIPT DE CREACIÓN DE TABLAS PARA SIN FILAS
--- Ejecutar en el SQL Editor de Supabase
+-- SCRIPT CANONICO DE SCHEMA "SIN FILAS"
+-- Refleja el estado REAL del proyecto Supabase asociado al backend Sin Filas.
+-- Ejecutar en el SQL Editor de Supabase.
 -- ==============================================================================
 
+-- 0. ENUM de estados de sesion
+-- Si ya existe, este bloque se puede saltar.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'sf_session_state') THEN
+    CREATE TYPE public.sf_session_state AS ENUM (
+      'en_proceso',
+      'finalizado',
+      'cobrado',
+      'cancelado'
+    );
+  END IF;
+END
+$$;
+
+
 -- 1. Tabla de Sesiones (sf_sessions)
-CREATE TABLE sf_sessions (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  vip_user_id     UUID NOT NULL, -- En tu BD real, pon REFERENCES profiles(id)
-  sede_id         UUID NOT NULL, -- En tu BD real, pon REFERENCES wc_sedes(id)
-  estado          TEXT NOT NULL DEFAULT 'finalizada' -- Simplificado para el flujo directo
-                  CHECK (estado IN ('abierta','finalizada','cobrada','cancelada')),
-  total_items     INTEGER NOT NULL DEFAULT 0,
-  cliente_nota    TEXT,                              
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  finalized_at    TIMESTAMPTZ,
-  redeemed_at     TIMESTAMPTZ,
-  cancelled_at    TIMESTAMPTZ
+CREATE TABLE IF NOT EXISTS public.sf_sessions (
+  id            uuid NOT NULL DEFAULT gen_random_uuid(),
+  vip_user_id   uuid NOT NULL,
+  sede_id       uuid NOT NULL,
+  estado        public.sf_session_state NOT NULL DEFAULT 'en_proceso',
+  total_items   numeric NOT NULL DEFAULT 0,
+  created_at    timestamptz NULL DEFAULT now(),
+  updated_at    timestamptz NULL DEFAULT now(),
+  CONSTRAINT sf_sessions_pkey PRIMARY KEY (id),
+  CONSTRAINT sf_sessions_sede_id_fkey FOREIGN KEY (sede_id)
+    REFERENCES public.wc_sedes (id) ON DELETE RESTRICT,
+  CONSTRAINT sf_sessions_vip_user_id_fkey FOREIGN KEY (vip_user_id)
+    REFERENCES public.profiles (user_id) ON DELETE RESTRICT
 );
 
-CREATE INDEX idx_sf_sessions_vip_estado ON sf_sessions (vip_user_id, estado);
-CREATE INDEX idx_sf_sessions_sede_estado ON sf_sessions (sede_id, estado);
-CREATE INDEX idx_sf_sessions_created_at ON sf_sessions (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sf_sessions_vip
+  ON public.sf_sessions USING btree (vip_user_id);
+CREATE INDEX IF NOT EXISTS idx_sf_sessions_sede
+  ON public.sf_sessions USING btree (sede_id);
+CREATE INDEX IF NOT EXISTS idx_sf_sessions_estado
+  ON public.sf_sessions USING btree (estado);
 
--- 2. Tabla de Items (sf_items)
-CREATE TABLE sf_items (
-  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  session_id        UUID NOT NULL REFERENCES sf_sessions(id) ON DELETE CASCADE,
-  siesa_codigo      TEXT NOT NULL,
-  nombre            TEXT NOT NULL,
-  unidad_medida     TEXT NOT NULL,
-  cantidad          NUMERIC(10,3) NOT NULL,
-  codigo_barras     TEXT NOT NULL, -- GS1 O EAN final a mostrar
-  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+
+-- 2. Tabla de Items de la sesion (sf_session_items)
+-- OJO: el nombre real es sf_session_items, no sf_items.
+CREATE TABLE IF NOT EXISTS public.sf_session_items (
+  id                uuid NOT NULL DEFAULT gen_random_uuid(),
+  session_id        uuid NOT NULL,
+  codigo_barras     text NOT NULL,
+  nombre_producto   text NULL,
+  cantidad          numeric NOT NULL DEFAULT 1,
+  unidad_medida     text NULL DEFAULT 'UND'::text,
+  created_at        timestamptz NULL DEFAULT now(),
+  CONSTRAINT sf_session_items_pkey PRIMARY KEY (id),
+  CONSTRAINT sf_session_items_session_id_fkey FOREIGN KEY (session_id)
+    REFERENCES public.sf_sessions (id) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_sf_items_session ON sf_items (session_id);
-CREATE INDEX idx_sf_items_siesa ON sf_items (siesa_codigo);
+CREATE INDEX IF NOT EXISTS idx_sf_items_session
+  ON public.sf_session_items USING btree (session_id);
+
 
 -- 3. Tabla de Tokens QR (sf_qr_tokens)
-CREATE TABLE sf_qr_tokens (
-  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  session_id    UUID NOT NULL REFERENCES sf_sessions(id) ON DELETE CASCADE,
-  token         TEXT NOT NULL UNIQUE,                
-  expires_at    TIMESTAMPTZ NOT NULL,
-  redeemed_at   TIMESTAMPTZ,
-  redeemed_by   UUID,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+-- La columna que marca "ya cobrado en caja" es used_at (NO redeemed_at).
+CREATE TABLE IF NOT EXISTS public.sf_qr_tokens (
+  id           uuid NOT NULL DEFAULT gen_random_uuid(),
+  session_id   uuid NOT NULL,
+  token        text NOT NULL,
+  expires_at   timestamptz NOT NULL,
+  used_at      timestamptz NULL,
+  created_at   timestamptz NULL DEFAULT now(),
+  CONSTRAINT sf_qr_tokens_pkey PRIMARY KEY (id),
+  CONSTRAINT sf_qr_tokens_token_key UNIQUE (token),
+  CONSTRAINT sf_qr_tokens_session_id_fkey FOREIGN KEY (session_id)
+    REFERENCES public.sf_sessions (id) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_sf_qr_tokens_session ON sf_qr_tokens (session_id);
-CREATE UNIQUE INDEX idx_sf_qr_tokens_token ON sf_qr_tokens (token);
+CREATE INDEX IF NOT EXISTS idx_sf_qr_token
+  ON public.sf_qr_tokens USING btree (token);
+
+
+-- 4. Tabla de Audit Log (sf_audit_log)
+-- La tabla existe en BD pero todavia NO se escribe desde el codigo.
+-- Cuando se conecte, usar `details` (jsonb) para guardar el payload del evento.
+CREATE TABLE IF NOT EXISTS public.sf_audit_log (
+  id           uuid NOT NULL DEFAULT gen_random_uuid(),
+  session_id   uuid NULL,
+  user_id      uuid NULL,
+  action       text NOT NULL,
+  details      jsonb NULL DEFAULT '{}'::jsonb,
+  created_at   timestamptz NULL DEFAULT now(),
+  CONSTRAINT sf_audit_log_pkey PRIMARY KEY (id),
+  CONSTRAINT sf_audit_log_session_id_fkey FOREIGN KEY (session_id)
+    REFERENCES public.sf_sessions (id) ON DELETE SET NULL,
+  CONSTRAINT sf_audit_log_user_id_fkey FOREIGN KEY (user_id)
+    REFERENCES public.profiles (user_id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sf_audit_session
+  ON public.sf_audit_log USING btree (session_id);
+
+
+-- ==============================================================================
+-- TABLAS REUSADAS (existentes en el proyecto, NO se crean aqui):
+--   - public.profiles        (PK: user_id)
+--   - public.wc_sedes        (PK: id)
+--   - public.items_siesa     (catalogo de productos)
+--   - public.siesa_codigos_barras (codigos de barras + presentaciones)
+--   - public.role_permissions (matriz de rutas por rol â€” ver 07-roles-setup.sql)
+-- ==============================================================================
