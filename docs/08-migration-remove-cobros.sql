@@ -1,0 +1,58 @@
+-- ==============================================================================
+-- MIGRACION: eliminar flujo de cobros del backend Sin Filas
+-- ==============================================================================
+--
+-- CONTEXTO
+-- El sistema Sin Filas termina en la generacion del QR. La redencion en caja
+-- (POST /sessions/:id/redeem) era un endpoint pensado para que el POS marcara
+-- la sesion como cobrada, pero se decidio que ese flujo NO es responsabilidad
+-- de Sin Filas. Por eso se elimino el endpoint, la tabla sf_qr_tokens, los
+-- audit events 'qr.generated' y 'qr.redeemed', y toda la logica asociada.
+--
+-- Este script aplica los cambios destructivos correspondientes en BD.
+--
+-- ADVERTENCIA
+-- DROP TABLE sf_qr_tokens BORRA todos los tokens generados historicamente.
+-- Si necesitas conservar el historial para auditoria, primero exportalo:
+--
+--   COPY (SELECT * FROM public.sf_qr_tokens) TO 'sf_qr_tokens_backup.csv' CSV HEADER;
+--
+-- Tras correr este script, tambien podes correr nuevamente 06-supabase-setup.sql
+-- (es idempotente y ya no incluye sf_qr_tokens).
+-- ==============================================================================
+
+
+-- 1. Eliminar la tabla sf_qr_tokens.
+--    CASCADE limpia FKs hacia sf_qr_tokens (no hay otras tablas que dependan,
+--    pero la flag esta por seguridad).
+DROP TABLE IF EXISTS public.sf_qr_tokens CASCADE;
+
+
+-- 2. Nota sobre el valor 'cobrado' del enum sf_session_state.
+--
+-- Postgres NO soporta ALTER TYPE ... DROP VALUE en un enum. Para sacar el valor
+-- 'cobrado' hay que reconstruir el tipo:
+--
+--   2.a Renombrar el tipo viejo:
+--       ALTER TYPE public.sf_session_state RENAME TO sf_session_state__old;
+--
+--   2.b Crear el tipo nuevo (sin 'cobrado'):
+--       CREATE TYPE public.sf_session_state AS ENUM (
+--         'en_proceso',
+--         'finalizado',
+--         'cancelado'
+--       );
+--
+--   2.c Migrar la columna en sf_sessions (asume que no hay filas con 'cobrado';
+--       si las hay, primero moverlas a 'finalizado' o 'cancelado'):
+--       ALTER TABLE public.sf_sessions
+--         ALTER COLUMN estado DROP DEFAULT,
+--         ALTER COLUMN estado TYPE public.sf_session_state
+--           USING estado::text::public.sf_session_state,
+--         ALTER COLUMN estado SET DEFAULT 'en_proceso';
+--
+--   2.d Borrar el tipo viejo:
+--       DROP TYPE public.sf_session_state__old;
+--
+-- Si NO te urge sacar 'cobrado' del enum, podes dejarlo: el backend nunca lo
+-- escribe, asi que queda como valor zombie sin impacto.

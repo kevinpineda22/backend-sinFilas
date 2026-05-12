@@ -11,7 +11,10 @@ import { QRCodeSVG } from 'qrcode.react';
 import './SFApp.css';
 import './components/SFButtons.css';
 
+import { useNavigate } from 'react-router-dom';
+
 export const SFApp = () => {
+  const navigate = useNavigate();
   const {
     sedeId,
     sedeName,
@@ -24,19 +27,44 @@ export const SFApp = () => {
 
   if (sedeLoading || !sedeId) {
     return (
-      <SFSedeSelector
-        sedes={sedes}
-        onSelect={selectSede}
-        loading={sedeLoading}
-        error={sedeError}
-      />
+      <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+        <button 
+          onClick={() => navigate('/acceso')}
+          style={{
+            position: 'absolute',
+            top: '1rem',
+            left: '1rem',
+            background: 'white',
+            border: '1px solid #E5E7EB',
+            padding: '0.5rem 1rem',
+            borderRadius: '0.5rem',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.5rem',
+            fontWeight: '600',
+            color: '#374151',
+            zIndex: 10,
+            boxShadow: '0 1px 2px 0 rgba(0, 0, 0, 0.05)'
+          }}
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+          Volver
+        </button>
+        <SFSedeSelector
+          sedes={sedes}
+          onSelect={selectSede}
+          loading={sedeLoading}
+          error={sedeError}
+        />
+      </div>
     );
   }
 
-  return <SFAppInner sedeName={sedeName} onChangeSede={clearSede} />;
+  return <SFAppInner sedeName={sedeName} onChangeSede={clearSede} onBack={() => navigate('/acceso')} />;
 };
 
-const SFAppInner = ({ sedeName, onChangeSede }) => {
+const SFAppInner = ({ sedeName, onChangeSede, onBack }) => {
   const [activeTab, setActiveTab] = useState('scanner');
   const [isScanning, setIsScanning] = useState(false);
   const [isProcessingScan, setIsProcessingScan] = useState(false);
@@ -185,10 +213,33 @@ const SFAppInner = ({ sedeName, onChangeSede }) => {
       <div className="sf-app-card">
 
         <header className="sf-app-header">
-          <h1>
-            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>
-            Sin Filas VIP
-          </h1>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            {onBack && (
+              <button 
+                onClick={onBack}
+                title="Volver a Accesos"
+                style={{
+                  background: 'rgba(255, 255, 255, 0.2)',
+                  border: '1px solid rgba(255, 255, 255, 0.3)',
+                  color: 'white',
+                  borderRadius: '50%',
+                  width: '32px',
+                  height: '32px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                  padding: 0
+                }}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+              </button>
+            )}
+            <h1 style={{ margin: 0, fontSize: '1.2rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>
+              Sin Filas VIP
+            </h1>
+          </div>
           <div>
             <span className="sf-badge">
               {items.length} {items.length === 1 ? 'item' : 'items'}
@@ -397,31 +448,65 @@ const SFAppInner = ({ sedeName, onChangeSede }) => {
           {activeTab === 'history' && (
             <div className="sf-history-tab">
               <h2>Historial de Sesiones</h2>
+              {(() => {
+                const empleadoInfoRaw = localStorage.getItem('empleado_info');
+                const correoEmpleado = localStorage.getItem('correo_empleado');
+                let userName = 'Usuario Desconocido';
+                
+                if (empleadoInfoRaw) {
+                  try {
+                    const info = JSON.parse(empleadoInfoRaw);
+                    userName = info.nombre || info.name || correoEmpleado || 'Usuario';
+                  } catch(e) {
+                    userName = correoEmpleado || 'Usuario';
+                  }
+                } else if (correoEmpleado) {
+                  userName = correoEmpleado;
+                }
+
+                return (
+                  <div style={{textAlign: 'center', marginBottom: '15px'}}>
+                    <span style={{
+                      backgroundColor: '#EEF2FF', 
+                      color: '#4F46E5', 
+                      padding: '5px 12px', 
+                      borderRadius: '20px', 
+                      fontSize: '0.85rem',
+                      fontWeight: '600'
+                    }}>
+                      VIP: {userName}
+                    </span>
+                  </div>
+                );
+              })()}
               {loadingHistory ? (
                 <p style={{textAlign:'center', marginTop:'20px'}}>Cargando historial...</p>
               ) : pastSessions.length === 0 ? (
                 <p style={{textAlign:'center', marginTop:'20px'}}>No hay sesiones pasadas.</p>
               ) : (
                 <ul className="sf-history-list">
-                  {pastSessions.map(session => (
-                    <li key={session.id} className="sf-history-item" onClick={() => {
-                       if (session.qrRawValue) {
-                         setQrRawValue(session.qrRawValue);
-                         setQrSessionData({ items: session.items, date: session.created_at });
-                         setActiveTab('qr');
-                       }
-                    }}>
-                      <div className="sf-history-info">
-                        <p><strong>Fecha:</strong> {new Date(session.created_at).toLocaleDateString()} {new Date(session.created_at).toLocaleTimeString()}</p>
-                        <p><strong>Items:</strong> {session.total_items} | <strong>Estado:</strong> {session.estado}</p>
-                      </div>
-                      {session.qrRawValue && (
-                        <div className="sf-history-action">
-                          Ver QR ➔
+                  {pastSessions.map(session => {
+                    const hasItems = Array.isArray(session.items) && session.items.length > 0;
+                    return (
+                      <li key={session.id} className="sf-history-item" onClick={() => {
+                        if (!hasItems) return;
+                        const manifest = generateManifestQRValue(session.items);
+                        setQrRawValue(manifest);
+                        setQrSessionData({ items: session.items, date: session.created_at });
+                        setActiveTab('qr');
+                      }}>
+                        <div className="sf-history-info">
+                          <p><strong>Fecha:</strong> {new Date(session.created_at).toLocaleDateString()} {new Date(session.created_at).toLocaleTimeString()}</p>
+                          <p><strong>Items:</strong> {session.total_items} | <strong>Estado:</strong> {session.estado}</p>
                         </div>
-                      )}
-                    </li>
-                  ))}
+                        {hasItems && (
+                          <div className="sf-history-action">
+                            Ver QR ➔
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
               <button onClick={() => setActiveTab('scanner')} className="sf-btn-full" style={{marginTop: '20px'}}>Volver al Escáner</button>

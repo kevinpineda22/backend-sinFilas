@@ -160,7 +160,7 @@ Crea la sesión y todos sus items de una sola vez (Lazy Sync). Inserta también 
 **Notas:**
 
 - `vip_user_id` y `sede_id` **NO** se envían en el body — vienen del JWT y del header `X-Sede-ID` respectivamente.
-- `raw_qr_string` se acepta opcionalmente pero **NO se persiste**: el QR lo arma el frontend y lo pinta en pantalla. El backend solo persiste un UUID en `sf_qr_tokens.token` como registro.
+- `raw_qr_string` se acepta opcionalmente pero **NO se persiste**: el QR lo arma el frontend y lo pinta en pantalla. El backend no persiste ningún token relacionado al QR.
 - El estado de la sesión se inserta directo como `'finalizado'`.
 - `total_items` = `items.length` (cantidad de líneas).
 - `unidad_medida` tiene default `'UND'` si no se envía.
@@ -170,11 +170,9 @@ Crea la sesión y todos sus items de una sola vez (Lazy Sync). Inserta también 
 
 1. `INSERT INTO sf_sessions (vip_user_id=req.user.id, sede_id=req.sedeId, estado='finalizado', total_items)`
 2. `INSERT INTO sf_session_items (...)` con todos los items
-3. `INSERT INTO sf_qr_tokens (session_id, token=uuid, expires_at='2099-12-31T23:59:59Z')`
-4. `logAudit('session.finalized')`
-5. `logAudit('qr.generated')`
+3. `logAudit('session.finalized')`
 
-Si falla alguno de los pasos **2 o 3**, se hace **rollback manual** (`DELETE FROM sf_sessions WHERE id = ?` con CASCADE) y se escribe `session.rollback` en el audit log.
+Si falla el paso **2**, se hace **rollback manual** (`DELETE FROM sf_sessions WHERE id = ?` con CASCADE) y se escribe `session.rollback` en el audit log.
 
 **Response 201:**
 ```json
@@ -198,32 +196,136 @@ Si falla alguno de los pasos **2 o 3**, se hace **rollback manual** (`DELETE FRO
 
 ---
 
-### `POST /api/sf/sessions/:id/redeem`
+### `GET /api/sf/sessions`
 
-Lo llama el POS al cobrar la sesión. Marca el token QR como usado y la sesión como `cobrado`.
+Historial de sesiones del VIP autenticado (sus propias sesiones). Es lo que consume el tab "Historial" del frontend SF.
 
-**Middlewares:** Zod params (UUID).
-**Auth:** ninguna (el POS no maneja JWTs de Supabase). Pendiente: agregar shared-secret o JWT de sistema si se expone públicamente.
-**Sede:** no se usa (la sede ya está en la sesión).
+**Middlewares:** `requireAuth`.
+**Auth:** JWT obligatorio (filtra por `req.user.id`).
+**Sede:** opcional. Si viene `X-Sede-ID`, filtra adicionalmente por esa sede.
 
-**Body:** vacío.
-
-**Pipeline:**
-
-1. `SELECT id, estado FROM sf_sessions WHERE id = :id`
-2. Si no existe → 404.
-3. Si `estado === 'cobrado'` → 409 (idempotente).
-4. Si `estado === 'cancelado'` → 409.
-5. `UPDATE sf_qr_tokens SET used_at = now() WHERE session_id = :id`
-6. `UPDATE sf_sessions SET estado='cobrado', updated_at=now() WHERE id = :id`
-7. `logAudit('qr.redeemed')`
+**Body:** ninguno.
 
 **Response 200:**
 ```json
 {
   "success": true,
-  "session_id": "uuid",
-  "redeemed_at": "2026-05-11T15:42:00.000Z"
+  "data": [
+    {
+      "id": "uuid",
+      "estado": "finalizado",
+      "total_items": 3,
+      "created_at": "2026-05-11T14:30:00Z",
+      "items": [
+        { "codigo_barras": "185325UND", "nombre": "ARROZ 500G", "cantidad": 3, "unidad_medida": "UND" }
+      ]
+    }
+  ]
+}
+```
+
+El response NO incluye ningún token de QR. Si el usuario reabre una sesión del historial, el frontend reconstruye el manifiesto QR localmente con `generateManifestQRValue(items)`.
+
+---
+
+## `admin/`
+
+> Todas las rutas `/admin/*` están protegidas con `requireAuth + optionalSede` aplicados con `router.use`.
+> Si se envía `X-Sede-ID`, los listados/agregados filtran por esa sede. Sin el header → vista global cross-sede.
+>
+> **Foco del panel admin:** registro, operación y analítica. El flujo de cobro/redención del QR lo gestiona el POS externo y NO se refleja en ninguno de estos endpoints (no se devuelve `sf_qr_tokens` ni se distingue "cobrado").
+
+### `GET /api/sf/admin/stats`
+
+KPIs del panel administrativo.
+
+**Auth:** `requireAuth`.
+**Sede:** `optionalSede` (filtra por `X-Sede-ID` si se envía).
+
+**Response 200:**
+```json
+{
+  "totalSessions": 124,
+  "totalItems": 1843,
+  "activeVips": 7,
+  "cancelled": 4,
+  "registered": 120,
+  "sessionsToday": 11
+}
+```
+
+| Campo | Definición |
+|---|---|
+| `totalSessions` | Cantidad total de filas en `sf_sessions` (filtradas por sede si aplica). |
+| `totalItems` | Suma de `sf_sessions.total_items` (líneas registradas). |
+| `activeVips` | Cantidad de `vip_user_id` únicos. |
+| `cancelled` | Sesiones con `estado='cancelado'`. |
+| `registered` | Sesiones con `estado != 'cancelado'`. |
+| `sessionsToday` | Sesiones creadas hoy (corte a `00:00` local del proceso). |
+
+---
+
+### `GET /api/sf/admin/sessions`
+
+Listado paginado de sesiones con filtros.
+
+**Auth:** `requireAuth`.
+**Sede:** `optionalSede`.
+
+**Query params (Zod `sessionsQuerySchema`):**
+
+| Param | Tipo | Default | Notas |
+|---|---|---|---|
+| `estado` | `'finalizado' \| 'cancelado'` | — | Filtra por estado exacto. |
+| `search` | string (1-120) | — | Match case-insensitive sobre `profiles.nombre`, `profiles.correo` y el UUID de la sesión. |
+| `limit` | int (1-200) | `50` | Tamaño de página. |
+| `offset` | int (≥0) | `0` | Desplazamiento. |
+
+**Response 200:**
+```json
+{
+  "data": [
+    {
+      "id": "uuid",
+      "estado": "finalizado",
+      "total_items": 12,
+      "created_at": "2026-05-11T14:30:00Z",
+      "vip_user_id": "uuid",
+      "sede_id": "uuid",
+      "profiles": { "nombre": "María García", "correo": "maria@merkahorrosas.com" }
+    }
+  ],
+  "total": 124
+}
+```
+
+`total` es el `count` exacto que devuelve Supabase contemplando los filtros aplicados antes del `range()`.
+
+---
+
+### `GET /api/sf/admin/sessions/:id`
+
+Detalle de una sesión + lista de items.
+
+**Auth:** `requireAuth`.
+**Params (Zod):** `id` debe ser UUID.
+
+**Response 200:**
+```json
+{
+  "session": {
+    "id": "uuid",
+    "estado": "finalizado",
+    "total_items": 3,
+    "created_at": "2026-05-11T14:30:00Z",
+    "vip_user_id": "uuid",
+    "sede_id": "uuid",
+    "profiles": { "nombre": "María García", "correo": "maria@merkahorrosas.com" }
+  },
+  "items": [
+    { "codigo_barras": "185325UND", "nombre_producto": "ARROZ 500G", "cantidad": 3, "unidad_medida": "UND" },
+    { "codigo_barras": "29987650123 45", "nombre_producto": "CARNE RES", "cantidad": 1.234, "unidad_medida": "KL" }
+  ]
 }
 ```
 
@@ -231,70 +333,70 @@ Lo llama el POS al cobrar la sesión. Marca el token QR como usado y la sesión 
 
 | Causa | HTTP | Body |
 |---|---|---|
-| `:id` no es UUID | 400 | `{ "error": "validation-error", "detail": ["id debe ser uuid"] }` |
+| `:id` no es UUID | 400 | `{ "error": "validation-error" }` |
 | Sesión no existe | 404 | `{ "error": "session-not-found" }` |
-| Sesión ya cobrada | 409 | `{ "error": "session-already-redeemed" }` |
-| Sesión cancelada | 409 | `{ "error": "session-cancelled" }` |
-| Falla Supabase | 500 | `{ "error": "<msg>" }` |
 
 ---
 
-## `admin/`
+### `GET /api/sf/admin/cancelled`
 
-> ⚠️ Hoy `/admin/*` está **abierto** (sin auth). Es deuda conocida; el dashboard administrativo se difiere a la próxima fase.
+Sesiones con `estado='cancelado'` (últimas 100).
 
-### `GET /api/sf/admin/stats`
-
-KPIs del dashboard.
+**Auth:** `requireAuth`.
+**Sede:** `optionalSede`.
 
 **Response 200:**
 ```json
 {
-  "totalSessions": 124,
-  "totalItems": 1843,
-  "activeVips": 7
+  "data": [
+    {
+      "id": "uuid",
+      "estado": "cancelado",
+      "total_items": 5,
+      "created_at": "2026-05-09T18:12:00Z",
+      "vip_user_id": "uuid",
+      "sede_id": "uuid",
+      "profiles": { "nombre": "Juan Pérez", "correo": "juan@merkahorrosas.com" }
+    }
+  ],
+  "total": 4
 }
 ```
 
-- `totalSessions` = `count(*)` de `sf_sessions`.
-- `totalItems` = `sum(cantidad)` de `sf_session_items` (sumado en memoria).
-- `activeVips` = cantidad de `vip_user_id` únicos en `sf_sessions`.
+---
 
-### `GET /api/sf/admin/sessions`
+### `GET /api/sf/admin/analytics`
 
-Últimas 50 sesiones con su token QR asociado (incluye `used_at`).
+Series temporales y rankings para los charts del panel (Recharts).
 
-**Response 200:**
-```json
-[
-  {
-    "id": "uuid",
-    "estado": "finalizado",
-    "total_items": 12,
-    "created_at": "2026-05-11T14:30:00Z",
-    "vip_user_id": "uuid",
-    "sede_id": "uuid",
-    "sf_qr_tokens": [
-      { "used_at": null }
-    ]
-  }
-]
-```
+**Auth:** `requireAuth`.
+**Sede:** `optionalSede`.
 
-- `sf_qr_tokens[0].used_at != null` → caja ya cobró este QR.
-- Estado `cobrado` + `used_at` poblado se sincroniza con el endpoint `/redeem`.
+**Query params (Zod `analyticsQuerySchema`):**
 
-### `GET /api/sf/admin/users`
-
-Listado plano de usuarios (`profiles`). No filtra por rol.
+| Param | Tipo | Default | Notas |
+|---|---|---|---|
+| `days` | int (1-180) | `30` | Tamaño de la ventana. La ventana arranca a las `00:00` UTC del día `now - days`. |
 
 **Response 200:**
 ```json
-[
-  { "user_id": "uuid", "nombre": "Juan Pérez", "correo": "juan@merkahorrosas.com", "role": "admin" },
-  { "user_id": "uuid", "nombre": "María García", "correo": "maria@merkahorrosas.com", "role": "sf_vip" }
-]
+{
+  "since": "2026-04-11T00:00:00.000Z",
+  "days": 30,
+  "daily":   [ { "date": "2026-04-11", "sessions": 4, "items": 27 } ],
+  "states":  [ { "estado": "finalizado", "count": 118 }, { "estado": "cancelado", "count": 6 } ],
+  "topVips": [ { "vip_user_id": "uuid", "nombre": "María", "correo": "maria@...", "sessions": 14, "items": 162 } ],
+  "hourly":  [ { "hour": 0, "sessions": 0 }, { "hour": 9, "sessions": 12 } ],
+  "totals":  { "sessions": 124, "items": 1843, "vips": 7 }
+}
 ```
+
+Estructuras:
+
+- `daily` — 1 fila por día dentro del rango (incluye días sin actividad).
+- `hourly` — array fijo de 24 elementos, uno por hora local del proceso.
+- `topVips` — top 10 por cantidad de sesiones (desc); incluye `nombre`/`correo` con `'Sin nombre'` / `''` como fallback.
+- `states` — distribución por `estado`.
 
 ---
 
@@ -302,9 +404,10 @@ Listado plano de usuarios (`profiles`). No filtra por rol.
 
 | Endpoint / mejora | Estado | Notas |
 |---|---|---|
-| Auth en `/admin/*` | Pendiente | Hoy abierto. |
-| Endpoint `GET /sessions/:id` con items | Pendiente | Para auditar detalle desde el dashboard. |
-| Endpoint `POST /sessions/:id/cancel` | Pendiente | Para mover sesión a `cancelado` desde admin. |
-| Auth/secret en `/sessions/:id/redeem` | Pendiente | Hoy abierto; aceptable mientras la URL no esté pública. |
-| Filtro por sede en `/admin/*` | Diferido | Forma parte de la fase del dashboard avanzado. |
-| Rate limiting en `/admin/*` | Pendiente | Sin protección. |
+| Auth en `/admin/*` | ✅ Cerrado | `requireAuth + optionalSede`. |
+| Filtro por sede en `/admin/*` | ✅ Cerrado | `optionalSede`: con `X-Sede-ID` filtra, sin él → global. |
+| Endpoint `GET /admin/sessions/:id` con items | ✅ Cerrado | Detalle + items. |
+| Analítica para charts | ✅ Cerrado | `/admin/analytics` con `daily`, `hourly`, `states`, `topVips`. |
+| Endpoint `POST /sessions/:id/cancel` | ⏳ Pendiente | Para mover sesión a `cancelado` desde el panel. Hoy `cancelado` solo se setea desde BD. |
+| Auth/secret en `/sessions/:id/redeem` | ⏳ Pendiente | Hoy abierto; aceptable mientras la URL no esté pública. |
+| Rate limiting en `/admin/*` | ⏳ Pendiente | Sin protección. |

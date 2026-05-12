@@ -46,7 +46,7 @@ describe('logAudit', () => {
   it('usa null para sessionId/userId si no se pasan', async () => {
     supabaseMock.setNextResult({ data: null, error: null });
 
-    await logAudit({ action: 'qr.redeemed' });
+    await logAudit({ action: 'session.finalized' });
 
     const insertCall = supabaseMock.calls.find((c) => c.method === 'insert');
     expect(insertCall).toBeDefined();

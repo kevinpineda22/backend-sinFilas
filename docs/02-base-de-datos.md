@@ -17,7 +17,7 @@ CREATE TYPE public.sf_session_state AS ENUM (
 
 - `en_proceso` — valor por defecto al `INSERT`. Hoy NO se usa: el flujo Lazy Sync crea la sesión ya en `finalizado`.
 - `finalizado` — sesión cerrada por el VIP, QR generado.
-- `cobrado` — el POS de la caja redimió el QR. (Hoy no hay endpoint que lo escriba todavía.)
+- `cobrado` — **valor zombie**: queda en la definición del enum por compatibilidad histórica, pero el backend NO lo escribe (el flujo de cobro fue removido del sistema; lo gestiona el POS externo sin tocar este backend). Postgres no soporta `DROP VALUE` directo en un enum — ver [`08-migration-remove-cobros.sql`](08-migration-remove-cobros.sql) para los pasos manuales si querés eliminarlo.
 - `cancelado` — sesión descartada.
 
 ## Tablas
@@ -73,30 +73,6 @@ CREATE INDEX idx_sf_items_session ON sf_session_items (session_id);
 - No se guarda `siesa_codigo` ni `origen` (no hay columna). La fuente del item se conserva implícitamente: si arranca con `29` y mide 13 chars → fue GS1 dinámico (con peso embebido).
 - `cantidad` queda `1` para items GS1 con peso embebido (la cantidad ya está en los gramos del propio código).
 
-### `sf_qr_tokens`
-
-Token único por sesión que el POS escanea.
-
-```sql
-CREATE TABLE public.sf_qr_tokens (
-  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  session_id   uuid NOT NULL REFERENCES sf_sessions(id) ON DELETE CASCADE,
-  token        text NOT NULL UNIQUE,
-  expires_at   timestamptz NOT NULL,
-  used_at      timestamptz,
-  created_at   timestamptz DEFAULT now()
-);
-
-CREATE INDEX idx_sf_qr_token ON sf_qr_tokens (token);
-```
-
-**Notas:**
-
-- La columna que marca "ya cobrado en caja" es `used_at` (NO `redeemed_at`).
-- Hoy `token` es un UUID aleatorio (`crypto.randomUUID()`), no un JWT firmado. La caja NO valida firma — lee la string cruda del manifiesto QR que el frontend pinta.
-- `expires_at` se inserta como `2099-12-31T23:59:59Z` para mantener compatibilidad con un POS offline a futuro.
-- No existe todavía un endpoint que actualice `used_at`: el dashboard la lee pero siempre da `null`.
-
 ### `sf_audit_log`
 
 Bitácora de eventos.
@@ -116,8 +92,9 @@ CREATE INDEX idx_sf_audit_session ON sf_audit_log (session_id);
 
 **Notas:**
 
-- La tabla EXISTE en BD pero el código todavía no escribe nada acá. Cuando se conecte, usar `details` (jsonb) para el payload del evento.
-- Acciones sugeridas cuando se implemente: `session.created`, `session.finalized`, `qr.generated`, `qr.redeemed`, `session.cancelled`.
+- `logAudit` (en `src/shared/audit/auditWriter.ts`) ya escribe acá. Es fire-and-forget: nunca rompe la operación principal.
+- Acciones implementadas hoy: `session.finalized`, `session.rollback`.
+- Pendiente de implementar: `session.cancelled`, `session.created` (este último solo aplicaría si en el futuro hubiera flujo `en_proceso`).
 
 ## Tablas existentes que reusamos
 
@@ -171,8 +148,7 @@ profiles ──────────────────┐
                       sf_sessions ◀──── wc_sedes (sede_id)
                        │   │
                        │   ├──▶ sf_session_items (1:N)
-                       │   ├──▶ sf_qr_tokens     (1:1 activo)
-                       │   └──▶ sf_audit_log     (1:N — pendiente de implementación)
+                       │   └──▶ sf_audit_log     (1:N — conectado)
                        │
                        └──── (productos vienen de items_siesa + siesa_codigos_barras)
 ```
@@ -183,12 +159,15 @@ profiles ──────────────────┐
 
 - `sf_sessions`: el VIP solo ve sus propias sesiones; admin ve todas.
 - `sf_session_items`: visibles si el usuario tiene acceso a la `session_id`.
-- `sf_qr_tokens`: solo lectura por el dueño de la sesión.
 - `sf_audit_log`: solo lectura para admin, escritura desde service role.
 
 ## Gaps conocidos
 
-- `sf_audit_log` no se escribe desde código todavía.
-- `sf_qr_tokens.used_at` nunca se actualiza (falta endpoint que el POS llame al cobrar).
-- `sf_sessions.updated_at` no tiene trigger que la mantenga al día.
+- `sf_sessions.updated_at` no tiene trigger que la mantenga al día (hoy nunca se actualiza desde el código).
 - `sf_sessions.estado` por defecto es `en_proceso` pero el flujo Lazy Sync inserta directo `finalizado`. Si en algún futuro se hace un flujo "abrir sesión → ir agregando items remotamente", el default ya está en el estado correcto.
+- No existe endpoint para mover una sesión a `cancelado` desde el panel; hoy solo puede setearse manualmente en BD.
+
+## Lo que YA NO existe (removido intencionalmente)
+
+- **Tabla `sf_qr_tokens`** — antes guardaba un UUID por QR generado (`token`, `expires_at`, `used_at`). Fue eliminada porque el sistema termina en la generación del QR: el manifiesto se reconstruye localmente desde `sf_session_items` cuando se reabre una sesión del historial. Si tu proyecto venía con esta tabla, mirá [`08-migration-remove-cobros.sql`](08-migration-remove-cobros.sql).
+- **Valor `cobrado` del enum `sf_session_state`** — sigue en la definición del tipo solo por compatibilidad histórica (Postgres no permite `DROP VALUE`), pero el backend nunca lo escribe.

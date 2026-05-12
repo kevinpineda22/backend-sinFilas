@@ -1,0 +1,304 @@
+/* =========================================
+   Estilos compartidos entre vistas admin SF
+   (tabla, ticket card, badges, filtros, modal)
+   Asume las CSS vars --pa-admin-* del layout padre.
+   ========================================= */
+
+/* ----- Filter bar ----- */
+.sfa-filter-bar {
+  background: var(--pa-admin-glass);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  padding: 16px 20px;
+  border-radius: var(--pa-admin-radius);
+  box-shadow: var(--pa-admin-shadow);
+  border: 1px solid var(--pa-admin-glass-border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: flex-end;
+  margin-bottom: 20px;
+}
+
+.sfa-filter-group {
+  flex: 1;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.sfa-filter-group label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--pa-admin-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.sfa-filter-input,
+.sfa-filter-select {
+  padding: 10px 14px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: var(--pa-admin-radius-sm);
+  outline: none;
+  font-family: inherit;
+  font-size: 0.88rem;
+  color: var(--pa-admin-text-dark);
+  background: rgba(255, 255, 255, 0.7);
+  transition: var(--pa-admin-transition);
+}
+
+.sfa-filter-input::placeholder { color: var(--pa-admin-text-secondary); }
+
+.sfa-filter-input:focus,
+.sfa-filter-select:focus {
+  border-color: var(--pa-admin-accent-blue);
+  background: white;
+  box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.12);
+}
+
+.sfa-filter-clear-btn {
+  background: rgba(0, 0, 0, 0.04);
+  color: var(--pa-admin-text-muted);
+  border: none;
+  padding: 10px 18px;
+  border-radius: 980px;
+  font-weight: 500;
+  font-family: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: var(--pa-admin-transition);
+}
+.sfa-filter-clear-btn:hover {
+  background: rgba(0, 0, 0, 0.08);
+  color: var(--pa-admin-text-dark);
+}
+
+.sfa-filter-results {
+  font-size: 0.8rem;
+  color: var(--pa-admin-text-muted);
+  font-weight: 500;
+  margin-bottom: 12px;
+}
+.sfa-filter-results strong {
+  color: var(--pa-admin-text-dark);
+  font-weight: 700;
+}
+
+/* ----- Card container (para tabla) ----- */
+.sfa-card {
+  background: var(--pa-admin-card-solid);
+  border-radius: var(--pa-admin-radius);
+  box-shadow: var(--pa-admin-shadow);
+  border: 1px solid var(--pa-admin-glass-border);
+  overflow: hidden;
+}
+
+.sfa-card-padded {
+  padding: 24px;
+}
+
+/* ----- Tabla ----- */
+.sfa-table-wrap {
+  overflow-x: auto;
+}
+
+.sfa-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.sfa-table th {
+  background: #f8fafc;
+  padding: 14px 20px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--pa-admin-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--pa-admin-separator);
+}
+
+.sfa-table td {
+  padding: 14px 20px;
+  font-size: 0.88rem;
+  color: var(--pa-admin-text-dark);
+  border-bottom: 1px solid var(--pa-admin-separator);
+  vertical-align: middle;
+}
+
+.sfa-table tr:last-child td { border-bottom: none; }
+.sfa-table tr.clickable { cursor: pointer; }
+.sfa-table tr.clickable:hover td { background-color: #f8fafc; }
+
+.sfa-th-center, .sfa-td-center { text-align: center !important; }
+.sfa-td-muted { color: var(--pa-admin-text-secondary) !important; font-weight: 500; }
+
+/* ----- User cell ----- */
+.sfa-user-cell {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+.sfa-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 0.88rem;
+  color: white;
+  flex-shrink: 0;
+}
+.sfa-avatar--indigo { background: linear-gradient(135deg, #6366f1, #4f46e5); }
+.sfa-avatar--purple { background: linear-gradient(135deg, #a855f7, #9333ea); }
+.sfa-avatar--orange { background: linear-gradient(135deg, #fb923c, #ea580c); }
+.sfa-avatar--red { background: linear-gradient(135deg, #f87171, #dc2626); }
+.sfa-avatar--green { background: linear-gradient(135deg, #4ade80, #16a34a); }
+
+.sfa-user-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.sfa-user-name {
+  font-weight: 600;
+  color: var(--pa-admin-text-dark);
+  font-size: 0.9rem;
+}
+.sfa-user-email {
+  font-size: 0.74rem;
+  color: var(--pa-admin-text-secondary);
+}
+
+/* ----- Badges ----- */
+.sfa-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.sfa-badge--qty { background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
+.sfa-badge--completada { background: rgba(0, 113, 227, 0.1); color: #0071e3; }
+.sfa-badge--en_proceso { background: rgba(255, 159, 10, 0.1); color: #ff9f0a; }
+
+/* ----- Ticket card (cards tipo pedido) ----- */
+.sfa-ticket-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 14px;
+}
+
+.sfa-ticket-card {
+  background: var(--pa-admin-card-bg);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border-radius: var(--pa-admin-radius);
+  box-shadow: var(--pa-admin-shadow);
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  cursor: pointer;
+  transition: var(--pa-admin-transition);
+  border: 1px solid var(--pa-admin-glass-border);
+  position: relative;
+  text-align: left;
+  font-family: inherit;
+}
+
+.sfa-ticket-card:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--pa-admin-shadow-hover);
+}
+
+.sfa-ticket-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.sfa-ticket-id {
+  font-weight: 600;
+  color: var(--pa-admin-accent-blue);
+  font-size: 0.82rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: -0.01em;
+}
+
+.sfa-ticket-date {
+  font-size: 0.75rem;
+  color: var(--pa-admin-text-secondary);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.sfa-ticket-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.85rem;
+  color: var(--pa-admin-text-secondary);
+  font-weight: 500;
+  padding-top: 10px;
+  border-top: 1px solid var(--pa-admin-separator);
+}
+
+.sfa-meta-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* ----- Date group separators ----- */
+.sfa-date-group {
+  margin-top: 30px;
+}
+.sfa-date-group:first-child {
+  margin-top: 0;
+}
+.sfa-date-separator {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.sfa-date-label {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--pa-admin-dark);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+.sfa-date-count {
+  background: rgba(0, 113, 227, 0.1);
+  color: var(--pa-admin-accent-blue);
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+.sfa-date-line {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(0, 113, 227, 0.2) 0%, transparent 100%);
+}
+
+@media (max-width: 768px) {
+  .sfa-filter-bar { padding: 14px; gap: 10px; }
+  .sfa-filter-group { min-width: 100%; }
+  .sfa-table th, .sfa-table td { padding: 10px 14px; font-size: 0.82rem; }
+  .sfa-ticket-grid { grid-template-columns: 1fr; gap: 10px; }
+}

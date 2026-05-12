@@ -1,10 +1,7 @@
 import { Request, Response } from 'express';
-import crypto from 'crypto';
 import { supabaseAdmin } from '../../shared/db/supabaseClient';
 import { logAudit } from '../../shared/audit/auditWriter';
-import { checkoutDirectBodySchema, redeemParamsSchema } from './sessions.schemas';
-
-const EXPIRES_NEVER = '2099-12-31T23:59:59Z';
+import { checkoutDirectBodySchema } from './sessions.schemas';
 
 const rollbackSession = async (sessionId: string): Promise<void> => {
   try {
@@ -47,7 +44,7 @@ export const createDirectCheckout = async (req: Request, res: Response): Promise
       .insert({
         vip_user_id: vipUserId,
         sede_id: sedeId,
-        estado: 'finalizado',
+        estado: 'completada',
         total_items: items.length,
       })
       .select()
@@ -71,29 +68,11 @@ export const createDirectCheckout = async (req: Request, res: Response): Promise
 
     if (itemsError) throw itemsError;
 
-    // 3. Token QR
-    const secureTokenId = crypto.randomUUID();
-
-    const { error: tokenError } = await supabaseAdmin.from('sf_qr_tokens').insert({
-      session_id: session.id,
-      token: secureTokenId,
-      expires_at: EXPIRES_NEVER,
-    });
-
-    if (tokenError) throw tokenError;
-
-    // Audit (fire-and-forget en la respuesta, pero await-eamos para tests deterministas)
     await logAudit({
       action: 'session.finalized',
       sessionId: session.id,
       userId: vipUserId,
       details: { sede_id: sedeId, total_items: items.length },
-    });
-    await logAudit({
-      action: 'qr.generated',
-      sessionId: session.id,
-      userId: vipUserId,
-      details: { token: secureTokenId },
     });
 
     res.status(201).json({
@@ -118,86 +97,11 @@ export const createDirectCheckout = async (req: Request, res: Response): Promise
 };
 
 /**
- * Marca una sesión como cobrada por el POS.
- * - Valida que `:id` sea UUID.
- * - Devuelve 404 si la sesión no existe.
- * - Devuelve 409 si la sesión NO está en estado 'finalizado' (ya cobrada o cancelada).
- * - Actualiza `sf_qr_tokens.used_at` y `sf_sessions.estado='cobrado'`.
- * - Escribe `qr.redeemed` en `sf_audit_log`.
- */
-export const redeemSession = async (req: Request, res: Response): Promise<void> => {
-  const parsed = redeemParamsSchema.safeParse(req.params);
-
-  if (!parsed.success) {
-    res.status(400).json({
-      error: 'validation-error',
-      detail: parsed.error.issues.map((i) => i.message),
-    });
-    return;
-  }
-
-  const sessionId = parsed.data.id;
-
-  try {
-    const { data: session, error: fetchError } = await supabaseAdmin
-      .from('sf_sessions')
-      .select('id, estado')
-      .eq('id', sessionId)
-      .single();
-
-    if (fetchError || !session) {
-      res.status(404).json({ error: 'session-not-found', detail: 'La sesión no existe' });
-      return;
-    }
-
-    if (session.estado === 'cobrado') {
-      res.status(409).json({ error: 'session-already-redeemed', detail: 'La sesión ya fue cobrada' });
-      return;
-    }
-
-    if (session.estado === 'cancelado') {
-      res.status(409).json({ error: 'session-cancelled', detail: 'La sesión fue cancelada' });
-      return;
-    }
-
-    const nowIso = new Date().toISOString();
-
-    const { error: tokenError } = await supabaseAdmin
-      .from('sf_qr_tokens')
-      .update({ used_at: nowIso })
-      .eq('session_id', sessionId);
-
-    if (tokenError) throw tokenError;
-
-    const { error: stateError } = await supabaseAdmin
-      .from('sf_sessions')
-      .update({ estado: 'cobrado', updated_at: nowIso })
-      .eq('id', sessionId);
-
-    if (stateError) throw stateError;
-
-    await logAudit({
-      action: 'qr.redeemed',
-      sessionId,
-      userId: null,
-      details: { redeemed_at: nowIso },
-    });
-
-    res.status(200).json({
-      success: true,
-      session_id: sessionId,
-      redeemed_at: nowIso,
-    });
-  } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Error interno del servidor' });
-  }
-};
-
-/**
  * Obtiene el historial de sesiones del usuario VIP actual.
  * - Requiere JWT (req.user.id).
  * - Opcionalmente filtra por sede si se provee X-Sede-ID.
- * - Incluye los items de cada sesión y el token QR asociado.
+ * - Incluye los items de cada sesión. El QR se reconstruye localmente
+ *   en el frontend a partir de los items (no se persiste token).
  */
 export const getUserSessions = async (req: Request, res: Response): Promise<void> => {
   if (!req.user?.id) {
@@ -221,9 +125,6 @@ export const getUserSessions = async (req: Request, res: Response): Promise<void
           nombre_producto,
           cantidad,
           unidad_medida
-        ),
-        sf_qr_tokens (
-          token
         )
       `)
       .eq('vip_user_id', vipUserId)
@@ -237,7 +138,6 @@ export const getUserSessions = async (req: Request, res: Response): Promise<void
 
     if (error) throw error;
 
-    // Formatear respuesta para el frontend
     const formattedSessions = sessions.map((session: any) => ({
       id: session.id,
       estado: session.estado,
@@ -249,7 +149,6 @@ export const getUserSessions = async (req: Request, res: Response): Promise<void
         cantidad: item.cantidad,
         unidad_medida: item.unidad_medida,
       })),
-      qrRawValue: session.sf_qr_tokens?.[0]?.token || null,
     }));
 
     res.status(200).json({

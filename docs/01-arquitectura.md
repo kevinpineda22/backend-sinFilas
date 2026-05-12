@@ -55,16 +55,18 @@ Sin Filas es una herramienta interna de **agilización de fila**. Un empleado (d
 │   │   │   [requireAuth + requireSede + Zod]                  │
 │   │   │   Inserta sesión + items + token. Rollback manual    │
 │   │   │   (DELETE sf_sessions) si falla items/token.         │
-│   │   │   Audit: session.finalized + qr.generated            │
+│   │   │   Audit: session.finalized                           │
 │   │   │                                                      │
-│   │   └─ POST /sessions/:id/redeem                           │
-│   │       Sin auth (lo llama el POS). Marca used_at en       │
-│   │       sf_qr_tokens y estado='cobrado' en sf_sessions.    │
-│   │       Audit: qr.redeemed                                 │
+│   │   └─ GET /sessions                                       │
+│   │       [requireAuth] Historial del VIP autenticado.       │
 │   │                                                          │
 │   └─ admin/                                                  │
-│       GET /admin/{stats,sessions,users}                      │
-│       (hoy sin auth; el dashboard se difiere)                │
+│       [requireAuth + optionalSede aplicados con router.use]  │
+│       GET /admin/stats         — KPIs del panel              │
+│       GET /admin/sessions      — listado con filtros (Zod)   │
+│       GET /admin/sessions/:id  — detalle + items             │
+│       GET /admin/cancelled     — sesiones canceladas         │
+│       GET /admin/analytics     — series para charts          │
 │                                                              │
 │  shared/                                                     │
 │   ├─ db/supabaseClient.ts (service_role, bypassa RLS)        │
@@ -81,7 +83,6 @@ Sin Filas es una herramienta interna de **agilización de fila**. Un empleado (d
 │  Tablas sf_*:                                                │
 │   - sf_sessions       (ENUM sf_session_state)                │
 │   - sf_session_items                                         │
-│   - sf_qr_tokens      (used_at se actualiza desde /redeem)   │
 │   - sf_audit_log      (se escribe desde logAudit)            │
 │                                                              │
 │  Tablas reusadas (sólo lectura):                             │
@@ -92,9 +93,10 @@ Sin Filas es una herramienta interna de **agilización de fila**. Un empleado (d
 └─────────────────────────────────────────────────────────────┘
 
                          ║
-              No hay conexión backend ↔ POS automática.
-              El POS lee la string cruda del QR; al cobrar puede
-              opcionalmente llamar a /sessions/:id/redeem.
+              No hay conexión backend ↔ POS.
+              El POS lee la string cruda del QR y procesa la
+              venta sin tocar este backend. Sin Filas termina
+              en la generación del QR.
                          ║
 
 ┌────────────────────────┐
@@ -108,9 +110,13 @@ Sin Filas es una herramienta interna de **agilización de fila**. Un empleado (d
 | Módulo | Endpoint | Middlewares | Responsabilidad |
 |---|---|---|---|
 | `catalog` | `GET /catalog/search` | (ninguno) | Busca productos por texto, EAN o GS1-128. Filtra presentaciones útiles para selección manual (`catalog.utils.ts`). |
-| `sessions` | `POST /sessions/checkout-direct` | `requireAuth`, `requireSede`, Zod body | Recibe el carrito completo, inserta sesión + items + token UUID con rollback. Escribe audit log. |
-| `sessions` | `POST /sessions/:id/redeem` | Zod params | Marca el QR como cobrado (lo llama el POS). |
-| `admin` | `GET /admin/*` | (ninguno por ahora) | Datos del dashboard administrativo. |
+| `sessions` | `POST /sessions/checkout-direct` | `requireAuth`, `requireSede`, Zod body | Recibe el carrito completo, inserta sesión + items con rollback. Escribe audit log. |
+| `sessions` | `GET /sessions` | `requireAuth`, `optionalSede` | Historial del VIP autenticado (sus propias sesiones + items). El QR se reconstruye localmente desde los items. |
+| `admin` | `GET /admin/stats` | `requireAuth`, `optionalSede` | KPIs del panel (totalSessions, totalItems, activeVips, cancelled, registered, sessionsToday). |
+| `admin` | `GET /admin/sessions` | `requireAuth`, `optionalSede`, Zod query | Listado paginado con filtros `estado` + `search`. |
+| `admin` | `GET /admin/sessions/:id` | `requireAuth`, `optionalSede`, Zod params | Detalle de una sesión + sus items. |
+| `admin` | `GET /admin/cancelled` | `requireAuth`, `optionalSede` | Sesiones con `estado='cancelado'`. |
+| `admin` | `GET /admin/analytics` | `requireAuth`, `optionalSede`, Zod query | Series para charts (`daily`, `hourly`, `states`, `topVips`, `totals`). |
 | `health` | `GET /health` | (ninguno) | Health check. |
 
 ## Middlewares compartidos
@@ -169,7 +175,7 @@ Lo que **NO reutilizamos**:
 
 - App para el cliente común (auto-scan).
 - Sync de catálogo desde WooCommerce.
-- Filtro de sede en `/admin/*` y dashboard avanzado (se difiere a fase 2).
 - Notificaciones push.
 - Modo offline robusto con queue de reintento.
 - Identificación del cliente final (cédula, lealtad, cupones).
+- Cualquier flujo de cobro, pago, redención o validación de caja. **Intencional**: el sistema termina en la generación del QR. El POS de caja procesa la venta de forma independiente y no comunica nada de vuelta a este backend.

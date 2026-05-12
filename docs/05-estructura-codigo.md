@@ -22,28 +22,64 @@ Backend-sinFilas/
 │   ├── config/
 │   │   └── env.ts                  (validación Zod de process.env)
 │   │
+│   ├── types/
+│   │   └── express.d.ts            (augmenta Request con user + sedeId)
+│   │
 │   ├── modules/
 │   │   ├── catalog/
 │   │   │   ├── catalog.route.ts
-│   │   │   └── catalog.controller.ts
+│   │   │   ├── catalog.controller.ts
+│   │   │   ├── catalog.schemas.ts  (Zod del query string)
+│   │   │   └── catalog.utils.ts    (isManualSearchPresentation)
 │   │   │
 │   │   ├── sessions/
 │   │   │   ├── sessions.route.ts
-│   │   │   └── sessions.controller.ts
+│   │   │   ├── sessions.controller.ts
+│   │   │   └── sessions.schemas.ts (Zod body + params)
 │   │   │
 │   │   └── admin/
-│   │       ├── admin.route.ts
-│   │       └── admin.controller.ts
+│   │       ├── admin.route.ts      (requireAuth + optionalSede globales)
+│   │       └── admin.controller.ts (Zod inline en queries/params)
 │   │
 │   └── shared/
-│       └── db/
-│           └── supabaseClient.ts   (cliente service_role, único)
+│       ├── db/
+│       │   └── supabaseClient.ts   (cliente service_role)
+│       ├── middleware/
+│       │   ├── auth.ts             (requireAuth — JWT con jsonwebtoken)
+│       │   └── sede.ts             (requireSede + optionalSede)
+│       └── audit/
+│           └── auditWriter.ts      (logAudit fire-and-forget)
+│
+├── tests/                          (Vitest + supertest)
+│   ├── setup.ts
+│   ├── helpers/supabaseMock.ts
+│   ├── health.test.ts
+│   ├── modules/
+│   │   ├── catalog/{schemas,controller,utils}.test.ts
+│   │   └── sessions/{schemas,controller,redeem}.test.ts
+│   └── shared/
+│       ├── middleware/{auth,sede}.test.ts
+│       └── audit/auditWriter.test.ts
+│
+├── sinFilas/                       (módulo frontend embebido en Pagina-web_React)
+│   ├── SFApp.jsx
+│   ├── api/sfApi.js
+│   ├── views/
+│   │   ├── SFAdminDashboard.jsx    (shell sidebar + router)
+│   │   └── admin/                  (vistas del panel admin)
+│   │       ├── SFHistoryView.jsx
+│   │       ├── SFCancelledView.jsx
+│   │       ├── SFIntelligenceView.jsx
+│   │       └── SFSessionDetailModal.jsx
+│   ├── components/ hooks/ store/ utils/
+│   └── *.css
 │
 ├── .env                             (NO commiteado)
 ├── .gitignore
 ├── package.json
 ├── package-lock.json
 ├── tsconfig.json
+├── vitest.config.ts
 └── vercel.json
 ```
 
@@ -82,7 +118,9 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
 };
 ```
 
-> Los controllers hoy hacen **todo**: parsean query/body, llaman a Supabase, formatean response y manejan errores. La separación en `service` + `repository` queda como roadmap.
+> Los controllers hoy hacen **todo**: parsean query/body con Zod, llaman a Supabase, formatean response y manejan errores. La separación en `service` + `repository` queda como roadmap.
+
+> El módulo `admin` ya monta sus middlewares globales con `router.use(requireAuth); router.use(optionalSede);` antes de registrar las rutas. Es el patrón sugerido para módulos donde todos los endpoints comparten el mismo contrato de auth/sede.
 
 ## Convenciones actuales
 
@@ -96,8 +134,8 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
 
 ### TypeScript
 
-- `tsconfig.json` con `strict: false`, `esModuleInterop: true`. Es lo que está cargado en el repo.
-- **Endurecer pendiente**: activar `noImplicitAny`, `strictNullChecks`, y eventualmente `strict: true`.
+- `tsconfig.json` con `strict: false` pero `noImplicitAny: true` + `strictNullChecks: true` activados explícitamente.
+- **Endurecer pendiente**: activar `strict: true` (alcanza efectos colaterales como `strictFunctionTypes`, `strictBindCallApply`, etc.).
 
 ### Errores
 
@@ -112,7 +150,9 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
 
 ### Tests
 
-- **No hay tests.** No hay `vitest.config.ts` ni archivos `*.test.ts`.
+- **Vitest + supertest** configurados (`vitest.config.ts`, `tests/setup.ts`).
+- Cobertura actual: schemas (catalog/sessions), controllers (catalog/sessions/redeem), utilidades (`catalog.utils`), middlewares (`auth`, `sede`), `auditWriter`, health.
+- Helper compartido: `tests/helpers/supabaseMock.ts` con mock encadenable del builder de Supabase.
 
 ## `tsconfig.json` actual
 
@@ -124,6 +164,8 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
     "outDir": "./dist",
     "rootDir": "./src",
     "strict": false,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
@@ -142,7 +184,10 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
   "scripts": {
     "dev": "nodemon src/server.ts",
     "build": "tsc",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "typecheck": "tsc --noEmit"
   },
   "type": "commonjs",
   "dependencies": {
@@ -151,17 +196,22 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.3",
     "morgan": "^1.10.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/morgan": "^1.9.10",
     "@types/node": "^25.6.2",
+    "@types/supertest": "^7.2.0",
     "nodemon": "^3.1.14",
+    "supertest": "^7.2.2",
     "ts-node": "^10.9.2",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.6"
   }
 }
 ```
@@ -174,7 +224,7 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
 | `NODE_ENV` | `development` o `production` | No |
 | `SUPABASE_URL` | URL del proyecto Supabase | **Sí** |
 | `SUPABASE_KEY` | Service role key (bypassa RLS) | **Sí** |
-| `SUPABASE_JWT_SECRET` | Secret para validar JWT de Supabase (uso futuro) | No (hoy no se usa) |
+| `SUPABASE_JWT_SECRET` | Secret para validar JWT de Supabase (lo usa `requireAuth`) | **Sí** (sin él, `requireAuth` responde 500) |
 | `QR_SIGNING_SECRET` | Secret para firmar tokens HMAC (uso futuro) | No (hoy no se usa) |
 
 > `env.ts` valida estas variables con Zod al arrancar. Si falta `SUPABASE_URL` o `SUPABASE_KEY`, el proceso muere antes de levantar el server.
@@ -236,11 +286,11 @@ src/
 | Práctica | Estado actual | Estado deseado |
 |---|---|---|
 | Capas `route → controller → service → repository` | Sólo `route → controller` | Las 4 capas |
-| Validación Zod en bodies | Sólo en `env.ts` | En todos los inputs |
+| Validación Zod en bodies/queries/params | ✅ Cubierto (`*.schemas.ts` + Zod inline en admin) | — |
 | Errores tipados + middleware central | No | `AppError` + subclases + middleware al final del pipeline |
 | `console.error` | Sí | Logger Pino con niveles |
-| `tsconfig` strict | `false` | Al menos `noImplicitAny` + `strictNullChecks` |
-| Tests | Ninguno | Vitest con tests unitarios e integración |
-| Audit log con cola | No | Inserción en transacción cuando sea posible |
+| `tsconfig` strict | `noImplicitAny` + `strictNullChecks` ON, `strict` aún OFF | `strict: true` |
+| Tests | ✅ Vitest + supertest activos | Subir cobertura de admin (hoy faltan tests del controller) |
+| Audit log con cola | ✅ Conectado fire-and-forget | Reintento + cola persistente cuando se necesite |
 
 Cuando se haga el refactor, ir un módulo a la vez (empezar por el de mayor riesgo: `sessions/checkout-direct`).

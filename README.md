@@ -18,13 +18,14 @@ Sistema interno de pre-escaneo: un empleado escanea/pesa los productos del clien
 App React (Vite) embebida en el repositorio principal de la web.
 
 - **Naming:** todos los componentes específicos llevan prefijo `SF` (`SFApp.jsx`, `SFManualSearch.jsx`, etc.) para no chocar con el resto del e-commerce.
-- **Rutas:** `/sin-filas` (app de escaneo) y `/sin-filas/admin` (dashboard).
+- **Rutas:** `/sin-filas` (app de escaneo) y `/sin-filas/admin` (panel administrativo).
 - **Sede gate:** al entrar a `/sin-filas`, si el usuario no tiene sede concreta (super_admin con `"todas"` o sin selección previa), se muestra `SFSedeSelector` que obliga a elegir una sede activa. La selección se persiste en `localStorage.sf_sede_id`.
 - **Auth:** JWT de Supabase. Cualquier usuario autenticado puede operar (no se filtra por rol).
 - **QR:** el backend NO firma JWTs. El frontend arma la cadena exacta que entiende el POS (`QTY*CODE\r\n` y GS1 de 13 dígitos para pesables) en `gs1Utils.js` y la renderiza con `qrcode.react`.
 - **Estado del carrito:** Zustand 5 con `persist` (`localStorage`). Se acumula localmente y se envía completo al hacer checkout.
 - **Modal de peso:** se ingresan **gramos enteros**. La conversión a kg vive dentro de `handleWeightSubmit` antes de generar el GS1.
 - **Estilos:** CSS puro (no usamos Tailwind en este proyecto).
+- **Panel admin SF (`views/SFAdminDashboard.jsx`):** layout sidebar morado + content sticky + toasts. Tres vistas: **Sesiones** (tabla con filtros `estado` + búsqueda), **Canceladas** (cards) e **Inteligencia** (recharts: serie diaria, hora pico, distribución de estados, top VIPs). Modal de detalle con items. **Foco del panel:** registro y operación, NO cobros — el flujo de redención del QR lo gestiona el POS externo.
 
 ### B. Backend (`Backend-sinFilas`)
 
@@ -41,31 +42,36 @@ Express 5 + TypeScript, deploy serverless en Vercel.
   - `GET /api/sf/health`
   - `GET /api/sf/catalog/search` — con filtro de presentaciones útiles para búsqueda manual
   - `POST /api/sf/sessions/checkout-direct` — con auth + sede + Zod + rollback transaccional
-  - `POST /api/sf/sessions/:id/redeem` — para el POS
-  - `GET /api/sf/admin/{stats,sessions,users}`
+  - `GET /api/sf/sessions` — historial del VIP autenticado
+  - `GET /api/sf/admin/stats` — KPIs del panel
+  - `GET /api/sf/admin/sessions` — listado con filtros (`estado`, `search`, `limit`, `offset`)
+  - `GET /api/sf/admin/sessions/:id` — detalle de la sesión + items
+  - `GET /api/sf/admin/cancelled` — sesiones canceladas
+  - `GET /api/sf/admin/analytics` — series para charts (`?days=30`)
+- Todas las rutas `/admin/*` protegidas con `requireAuth + optionalSede` (filtra por `X-Sede-ID` si se envía).
+- **El sistema termina en la generación del QR.** No hay endpoint de cobro/redención: la caja lee el QR como string crudo y el flujo de cobro ocurre exclusivamente en el POS externo.
 - **CORS:** abierto a cualquier origen + OPTIONS preflight.
 
 ### C. Base de datos (Supabase)
 
 PostgreSQL compartido con `backend-woocommerce`. Tablas con prefijo `sf_`:
 
-- `sf_sessions` — cabecera del carrito (ENUM `sf_session_state`: `en_proceso`, `finalizado`, `cobrado`, `cancelado`).
+- `sf_sessions` — cabecera del carrito (ENUM `sf_session_state`: `en_proceso`, `finalizado`, `cancelado`. El valor `cobrado` permanece en la definición del enum por compatibilidad histórica pero el código nunca lo escribe).
 - `sf_session_items` — items escaneados/pesados.
-- `sf_qr_tokens` — token UUID por sesión, con `used_at` que el endpoint `/redeem` actualiza.
 - `sf_audit_log` — bitácora; ya se escribe desde el backend.
 
-Detalles y SQL canónico en [`docs/06-supabase-setup.sql`](./docs/06-supabase-setup.sql).
+Detalles y SQL canónico en [`docs/06-supabase-setup.sql`](./docs/06-supabase-setup.sql). Si tu proyecto venía de una versión anterior con `sf_qr_tokens`, mirá [`docs/08-migration-remove-cobros.sql`](./docs/08-migration-remove-cobros.sql).
 
 ## 2. Decisiones arquitectónicas clave
 
 1. **Lazy Sync (Checkout Directo).** El carrito vive en el frontend hasta "Finalizar"; ahí se envía completo a `/api/sf/sessions/checkout-direct`. Cero llamadas per-item.
-2. **QR generado en el frontend.** El POS lee la string cruda del QR sin pasar por el backend. El backend solo persiste un UUID de auditoría.
-3. **Tokens sin expiración real.** `expires_at` se inserta como `2099-12-31T23:59:59Z` por compatibilidad con un POS offline futuro.
+2. **QR generado y persistido en el frontend.** El POS lee la string cruda del QR sin pasar por el backend. El backend NO persiste ningún token de QR — el manifiesto se reconstruye localmente a partir de los items en cualquier momento (incluso al reabrir una sesión del historial).
+3. **El sistema termina en el QR.** No hay endpoint `/redeem` ni columna `used_at`. La redención en caja es responsabilidad exclusiva del POS externo y NO se trackea desde este backend.
 4. **Sin restricción por rol.** Cualquier empleado autenticado puede operar (decisión del producto para días de alta carga).
 5. **Sede obligatoria por sesión.** Super_admins (sin sede asignada en `profiles`) deben elegir una en el `SFSedeSelector` antes de operar. Persistido en `localStorage.sf_sede_id`.
 6. **Filtro de presentaciones para búsqueda manual.** En el buscador, solo se muestran códigos útiles para selección (GS1 corto `29XXXXX` para pesables; sufijo de unidad `185325UND`, `187825P6` para no-pesables). El escáner sigue aceptando cualquier código.
 7. **Peso en gramos.** El modal de peso pide gramos enteros (báscula real). La conversión a kg vive dentro del frontend antes de armar el GS1.
-8. **Rollback manual.** Supabase REST no soporta transacciones; si falla items o token al hacer checkout, se borra la sesión recién creada (CASCADE limpia hijos).
+8. **Rollback manual.** Supabase REST no soporta transacciones; si falla la inserción de items al hacer checkout, se borra la sesión recién creada (CASCADE limpia hijos).
 9. **Audit fire-and-forget.** `logAudit` nunca rompe la operación principal. Sus errores quedan loggeados.
 
 ## 3. Comandos
@@ -98,17 +104,18 @@ QR_SIGNING_SECRET=          # opcional, uso futuro
 | Gap | Estado |
 |---|---|
 | Validación JWT en backend | ✅ Cerrado (`requireAuth` con `jsonwebtoken`) |
-| Validación Zod en bodies | ✅ Cerrado (`catalog.schemas`, `sessions.schemas`) |
+| Validación Zod en bodies | ✅ Cerrado (`catalog.schemas`, `sessions.schemas`, `admin.controller` valida queries y params) |
 | `sede_id` y `vip_user_id` en UUID cero | ✅ Cerrado (vienen de JWT + header `X-Sede-ID`) |
 | Rollback transaccional en checkout-direct | ✅ Cerrado (DELETE de sesión + CASCADE) |
 | Escritura en `sf_audit_log` | ✅ Cerrado (`logAudit` conectado) |
-| Endpoint `/sessions/:id/redeem` | ✅ Cerrado |
+| Flujo de cobro/redención | ⛔ Removido (intencional — fuera del scope de Sin Filas; lo gestiona el POS externo). |
+| Auth en `/admin/*` | ✅ Cerrado (`requireAuth + optionalSede` aplicados con `router.use`) |
+| Dashboard admin con filtro de sede | ✅ Cerrado (`optionalSede` filtra por `X-Sede-ID`; sin header → vista global) |
+| Panel admin con vistas reales | ✅ Cerrado (Sesiones / Canceladas / Inteligencia + modal detalle) |
 | `tsconfig` strict | ⚠️ Parcial (`noImplicitAny` + `strictNullChecks` ON, `strict` aún en `false`) |
-| Tests | ✅ 84 tests verdes con Vitest + supertest |
+| Tests | ✅ Vitest + supertest verdes (sin la suite de redeem que fue removida) |
 | Refactor a capas service/repository | ⏳ Pendiente |
-| Auth en `/admin/*` | ⏳ Pendiente (hoy abierto) |
 | RLS en tablas `sf_*` | ⏳ Pendiente (hoy se usa `service_role`) |
-| Dashboard admin con filtro de sede | ⏳ Pendiente (intencional, se difiere) |
 
 ## 6. Cómo probar end-to-end
 
@@ -118,11 +125,11 @@ QR_SIGNING_SECRET=          # opcional, uso futuro
    - Si tenés sede asignada en `profiles`, entra directo.
 3. Escaneá o buscá un producto, agregalo al carrito.
 4. Finalizá → ves el QR.
-5. Para marcar el QR como cobrado (simulando POS):
-   ```bash
-   curl -X POST https://backend-sin-filas.vercel.app/api/sf/sessions/<session_id>/redeem
-   ```
-6. El dashboard admin debería mostrar la sesión como "Cobrado" + el `used_at` registrado.
+5. La caja escanea el QR del celular y lo procesa con su POS. **No hay paso de redención hacia este backend** — el ciclo de Sin Filas terminó en el paso 4.
+6. En `/sin-filas/admin`:
+   - **Sesiones**: aparece la sesión recién creada (estado *Registrada*).
+   - **Inteligencia**: la barra del día sube en el chart de "Sesiones por día".
+   - Clic en una fila → modal con los ítems escaneados.
 
 ---
 

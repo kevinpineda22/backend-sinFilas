@@ -1,26 +1,27 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap");
+@import url("./styles/sf-corporate-tokens.css");
 
 :root {
-  --sf-primary: #4F46E5;
-  --sf-primary-hover: #4338CA;
-  --sf-primary-light: #EEF2FF;
-  --sf-secondary: #10B981;
-  --sf-secondary-hover: #059669;
-  --sf-danger: #EF4444;
-  --sf-danger-hover: #DC2626;
-  --sf-danger-light: #FEF2F2;
-  --sf-bg: #F3F4F6;
-  --sf-surface: #FFFFFF;
-  --sf-text-main: #111827;
-  --sf-text-muted: #6B7280;
-  --sf-border: #E5E7EB;
+  /* Aliases del sistema corporativo (--sfc-*) para retro-compatibilidad con clases existentes */
+  --sf-primary: var(--sfc-medium);
+  --sf-primary-hover: var(--sfc-dark);
+  --sf-primary-light: rgba(45, 21, 120, 0.08);
+  --sf-secondary: var(--sfc-accent-green);
+  --sf-secondary-hover: #16a34a;
+  --sf-danger: var(--sfc-accent-red);
+  --sf-danger-hover: #b91c1c;
+  --sf-danger-light: rgba(255, 69, 58, 0.08);
+  --sf-bg: var(--sfc-bg);
+  --sf-surface: var(--sfc-card-solid);
+  --sf-text-main: var(--sfc-text-dark);
+  --sf-text-muted: var(--sfc-text-muted);
+  --sf-border: var(--sfc-border);
   --sf-shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-  --sf-shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-  --sf-shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-  --sf-radius-md: 0.75rem;
-  --sf-radius-lg: 1rem;
-  --sf-radius-full: 9999px;
-  --sf-font: "Inter", sans-serif;
+  --sf-shadow-md: var(--sfc-shadow);
+  --sf-shadow-lg: var(--sfc-shadow-hover);
+  --sf-radius-md: var(--sfc-radius-sm);
+  --sf-radius-lg: var(--sfc-radius);
+  --sf-radius-full: var(--sfc-radius-pill);
+  --sf-font: var(--sfc-font);
 }
 
 * {
@@ -41,7 +42,9 @@
 }
 
 .sf-app-card {
-  background-color: var(--sf-surface);
+  background-color: var(--sfc-card-bg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   border-radius: var(--sf-radius-lg);
   box-shadow: var(--sf-shadow-lg);
   width: 100%;
@@ -52,11 +55,23 @@
   height: 92vh;
   max-height: 850px;
   position: relative;
-  border: 1px solid var(--sf-border);
+  border: 1px solid var(--sfc-glass-border);
+}
+
+.sf-app-card::after {
+  content: "";
+  position: absolute;
+  bottom: -80px;
+  right: -80px;
+  width: 220px;
+  height: 220px;
+  background: radial-gradient(circle, rgba(26, 10, 78, 0.08) 0%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
 }
 
 .sf-app-header {
-  background: linear-gradient(135deg, var(--sf-primary), #6366F1);
+  background: linear-gradient(135deg, var(--sfc-dark), var(--sfc-medium));
   color: #ffffff;
   padding: 1.25rem 1.5rem;
   display: flex;
@@ -64,6 +79,9 @@
   align-items: center;
   flex-shrink: 0;
   box-shadow: var(--sf-shadow-sm);
+  position: relative;
+  z-index: 1;
+  letter-spacing: -0.018em;
 }
 
 .sf-app-header h1 {
@@ -91,8 +109,10 @@
   align-items: center;
   gap: 0.5rem;
   padding: 0.6rem 1rem;
-  background-color: var(--sf-primary-light);
-  border-bottom: 1px solid var(--sf-border);
+  background-color: var(--sfc-glass);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--sfc-glass-border);
   flex-shrink: 0;
   font-size: 0.85rem;
 }
@@ -358,10 +378,12 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   height: 100%;
   text-align: center;
   padding: 1rem;
+  overflow-y: auto;
+  position: relative;
 }
 
 .sf-qr-box {

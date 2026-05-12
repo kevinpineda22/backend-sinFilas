@@ -292,9 +292,9 @@ Buscador devuelve solo:
 
 ---
 
-## Flujo 7 — Validación en la caja + redeem
+## Flujo 7 — Validación en la caja + redeem (POS externo)
 
-Hoy el POS lee la string cruda del QR y la procesa como si fuera el formato del picking. Adicionalmente puede (opcionalmente) marcar la sesión como cobrada:
+Hoy el POS lee la string cruda del QR y la procesa como si fuera el formato del picking. Adicionalmente puede (opcionalmente) marcar la sesión como redimida:
 
 ```
 1. POS escanea QR del celular.
@@ -303,10 +303,11 @@ Hoy el POS lee la string cruda del QR y la procesa como si fuera el formato del 
      - Backend marca sf_qr_tokens.used_at = now()
      - Backend pasa sf_sessions.estado a 'cobrado'
      - Audit log: qr.redeemed
-4. El dashboard admin refleja "Cobrado en Caja: SÍ".
 ```
 
-Si el POS NO llama al redeem, la sesión queda `finalizado` para siempre y el dashboard la muestra como PENDIENTE.
+**El sistema Sin Filas termina en el paso 2.** La redención (paso 3) es opcional y queda solo registrada en BD (`sf_qr_tokens.used_at` y estado `cobrado`) para auditoría futura.
+
+**El panel admin SF NO refleja este estado**: los endpoints `/admin/*` no consultan `sf_qr_tokens`, y las sesiones `cobrado` aparecen como "Registrada" en la UI. La separación es intencional — Sin Filas se ocupa de generar el QR, no de cobrar.
 
 ---
 
@@ -314,12 +315,14 @@ Si el POS NO llama al redeem, la sesión queda `finalizado` para siempre y el da
 
 | Flujo | Estado | Notas |
 |---|---|---|
-| Cancelación de sesión desde el dashboard | Pendiente | Falta endpoint y UI |
+| Cancelación de sesión desde el panel | Pendiente | Falta endpoint `POST /sessions/:id/cancel` y UI. Hoy `cancelado` solo se setea desde BD. |
 | Edición de items después de agregar | Pendiente | Hoy solo se puede eliminar |
 | Sesión `en_proceso` con sync remoto | Pendiente | El default del ENUM es `en_proceso` pero no se usa hoy |
 | Modo offline robusto con queue de reintento | Parcial | Zustand persist guarda en localStorage; falta queue para reintento del POST |
-| Filtro por sede en `/admin/*` | Diferido | Se difiere a la fase del dashboard avanzado |
-| Auth en `/admin/*` y en `/redeem` | Pendiente | Hoy abiertos |
+| Filtro por sede en `/admin/*` | ✅ Cerrado | `optionalSede` filtra por `X-Sede-ID`; sin header → vista global |
+| Auth en `/admin/*` | ✅ Cerrado | `requireAuth + optionalSede` aplicados con `router.use` |
+| Auth en `/redeem` | Pendiente | Hoy abierto; aceptable mientras la URL no esté pública |
+| Visualización de cobro en el panel | NO aplica | Intencional: el panel admin SF termina en el QR. La redención queda solo en BD para el POS externo. |
 
 ---
 

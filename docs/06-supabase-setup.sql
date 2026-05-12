@@ -2,15 +2,24 @@
 -- SCRIPT CANONICO DE SCHEMA "SIN FILAS"
 -- Refleja el estado REAL del proyecto Supabase asociado al backend Sin Filas.
 -- Ejecutar en el SQL Editor de Supabase.
+--
+-- Si tu proyecto venia de una version anterior que tenia sf_qr_tokens y/o el
+-- valor 'cobrado' en el enum, mira tambien 08-migration-remove-cobros.sql.
 -- ==============================================================================
 
 -- 0. ENUM de estados de sesion
--- Si ya existe, este bloque se puede saltar.
+-- 'cobrado', 'finalizado' y 'cancelado' permanecen en la definicion solo por
+-- compatibilidad historica:
+--   - El backend NO los escribe nunca.
+--   - Postgres no soporta REMOVE VALUE en un enum sin renombrar el tipo,
+--     por eso se dejan inertes.
+-- Estados activos en codigo: 'en_proceso', 'completada'.
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'sf_session_state') THEN
     CREATE TYPE public.sf_session_state AS ENUM (
       'en_proceso',
+      'completada',
       'finalizado',
       'cobrado',
       'cancelado'
@@ -63,28 +72,9 @@ CREATE INDEX IF NOT EXISTS idx_sf_items_session
   ON public.sf_session_items USING btree (session_id);
 
 
--- 3. Tabla de Tokens QR (sf_qr_tokens)
--- La columna que marca "ya cobrado en caja" es used_at (NO redeemed_at).
-CREATE TABLE IF NOT EXISTS public.sf_qr_tokens (
-  id           uuid NOT NULL DEFAULT gen_random_uuid(),
-  session_id   uuid NOT NULL,
-  token        text NOT NULL,
-  expires_at   timestamptz NOT NULL,
-  used_at      timestamptz NULL,
-  created_at   timestamptz NULL DEFAULT now(),
-  CONSTRAINT sf_qr_tokens_pkey PRIMARY KEY (id),
-  CONSTRAINT sf_qr_tokens_token_key UNIQUE (token),
-  CONSTRAINT sf_qr_tokens_session_id_fkey FOREIGN KEY (session_id)
-    REFERENCES public.sf_sessions (id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_sf_qr_token
-  ON public.sf_qr_tokens USING btree (token);
-
-
--- 4. Tabla de Audit Log (sf_audit_log)
--- La tabla existe en BD pero todavia NO se escribe desde el codigo.
--- Cuando se conecte, usar `details` (jsonb) para guardar el payload del evento.
+-- 3. Tabla de Audit Log (sf_audit_log)
+-- Escribe `logAudit()` desde el backend (fire-and-forget).
+-- Acciones activas en codigo: 'session.finalized', 'session.rollback'.
 CREATE TABLE IF NOT EXISTS public.sf_audit_log (
   id           uuid NOT NULL DEFAULT gen_random_uuid(),
   session_id   uuid NULL,
@@ -110,4 +100,8 @@ CREATE INDEX IF NOT EXISTS idx_sf_audit_session
 --   - public.items_siesa     (catalogo de productos)
 --   - public.siesa_codigos_barras (codigos de barras + presentaciones)
 --   - public.role_permissions (matriz de rutas por rol — ver 07-roles-setup.sql)
+--
+-- TABLAS QUE YA NO EXISTEN (eliminadas al cortar el flujo de cobros):
+--   - public.sf_qr_tokens    (token UUID por sesion + used_at)
+--   Si tu proyecto aun la tiene, corre 08-migration-remove-cobros.sql.
 -- ==============================================================================

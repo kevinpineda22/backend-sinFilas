@@ -39,22 +39,41 @@ export const finalizeCheckoutDirect = async (items, rawQrString) => {
   return data;
 };
 
+export const getUserSessions = async () => {
+  const { data } = await sfApi.get('/sessions');
+  return data.data;
+};
+
+// ============================================================================
+// ADMIN
+// ============================================================================
+
 export const getAdminStats = async () => {
   const { data } = await sfApi.get('/admin/stats');
   return data;
 };
 
-export const getAdminSessions = async () => {
-  const { data } = await sfApi.get('/admin/sessions');
+export const getAdminSessions = async (params = {}) => {
+  const { data } = await sfApi.get('/admin/sessions', { params });
   return data;
 };
 
-export const getAdminUsers = async () => {
-  const { data } = await sfApi.get('/admin/users');
+export const getAdminSessionDetail = async (id) => {
+  const { data } = await sfApi.get(`/admin/sessions/${id}`);
   return data;
 };
 
-export const getUserSessions = async () => {
-  const { data } = await sfApi.get('/sessions');
-  return data.data;
+export const getAdminCancelled = async () => {
+  const { data } = await sfApi.get('/admin/cancelled');
+  return data;
+};
+
+export const getAdminAnalytics = async (days = 30) => {
+  const { data } = await sfApi.get('/admin/analytics', { params: { days } });
+  return data;
+};
+
+export const getAdminVips = async () => {
+  const { data } = await sfApi.get('/admin/vips');
+  return data;
 };

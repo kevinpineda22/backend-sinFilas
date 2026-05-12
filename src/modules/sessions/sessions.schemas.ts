@@ -18,9 +18,3 @@ export const checkoutDirectBodySchema = z.object({
 
 export type CheckoutDirectBody = z.infer<typeof checkoutDirectBodySchema>;
 export type CheckoutItem = z.infer<typeof itemSchema>;
-
-export const redeemParamsSchema = z.object({
-  id: z.string().uuid('id debe ser uuid'),
-});
-
-export type RedeemParams = z.infer<typeof redeemParamsSchema>;

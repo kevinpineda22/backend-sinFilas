@@ -101,9 +101,7 @@ describe('POST /api/sf/sessions/checkout-direct (con auth y sede)', () => {
     supabaseMock.setNextResults([
       { data: { id: 'session-uuid-1' }, error: null }, // INSERT sf_sessions .select().single()
       { data: null, error: null }, // INSERT sf_session_items
-      { data: null, error: null }, // INSERT sf_qr_tokens
       { data: null, error: null }, // INSERT sf_audit_log session.finalized
-      { data: null, error: null }, // INSERT sf_audit_log qr.generated
     ]);
 
     const res = await authedRequest().send({ items: [validItem] });
@@ -116,7 +114,7 @@ describe('POST /api/sf/sessions/checkout-direct (con auth y sede)', () => {
     const insertedRow = sessionInsertCall!.args[0] as Record<string, unknown>;
     expect(insertedRow.vip_user_id).toBe(VIP_USER_ID);
     expect(insertedRow.sede_id).toBe(VALID_UUID);
-    expect(insertedRow.estado).toBe('finalizado');
+    expect(insertedRow.estado).toBe('completada');
     expect(insertedRow.total_items).toBe(1);
   });
 
@@ -145,7 +143,6 @@ describe('POST /api/sf/sessions/checkout-direct (con auth y sede)', () => {
     const res = await authedRequest().send({ items: [validItem] });
     expect(res.status).toBe(500);
 
-    // Verificamos que se llamó delete + eq(id, session-rollback-1)
     const deleteCall = supabaseMock.calls.find((c) => c.method === 'delete');
     expect(deleteCall).toBeDefined();
 
@@ -154,33 +151,11 @@ describe('POST /api/sf/sessions/checkout-direct (con auth y sede)', () => {
     expect(sessionEq).toBeDefined();
   });
 
-  it('retorna 500 y hace rollback si falla la inserción del token QR', async () => {
-    supabaseMock.setNextResults([
-      { data: { id: 'session-rollback-2' }, error: null }, // INSERT sf_sessions
-      { data: null, error: null }, // INSERT sf_session_items OK
-      { data: null, error: { message: 'token error' } }, // INSERT sf_qr_tokens falla
-      { data: null, error: null }, // DELETE de la sesión
-      { data: null, error: null }, // INSERT sf_audit_log session.rollback
-    ]);
-
-    const res = await authedRequest().send({ items: [validItem] });
-    expect(res.status).toBe(500);
-
-    const deleteCall = supabaseMock.calls.find((c) => c.method === 'delete');
-    expect(deleteCall).toBeDefined();
-
-    const eqCalls = supabaseMock.calls.filter((c) => c.method === 'eq');
-    const sessionEq = eqCalls.find((c) => c.args[0] === 'id' && c.args[1] === 'session-rollback-2');
-    expect(sessionEq).toBeDefined();
-  });
-
   it('happy path NO llama delete (sin rollback necesario)', async () => {
     supabaseMock.setNextResults([
       { data: { id: 'session-happy' }, error: null }, // INSERT sf_sessions
       { data: null, error: null }, // INSERT sf_session_items
-      { data: null, error: null }, // INSERT sf_qr_tokens
       { data: null, error: null }, // INSERT sf_audit_log session.finalized
-      { data: null, error: null }, // INSERT sf_audit_log qr.generated
     ]);
 
     const res = await authedRequest().send({ items: [validItem] });
@@ -188,11 +163,9 @@ describe('POST /api/sf/sessions/checkout-direct (con auth y sede)', () => {
     expect(supabaseMock.calls.find((c) => c.method === 'delete')).toBeUndefined();
   });
 
-  it('happy path escribe sf_audit_log con session.finalized y qr.generated', async () => {
+  it('happy path escribe sf_audit_log con session.finalized', async () => {
     supabaseMock.setNextResults([
       { data: { id: 'session-audit' }, error: null },
-      { data: null, error: null },
-      { data: null, error: null },
       { data: null, error: null },
       { data: null, error: null },
     ]);
@@ -200,10 +173,9 @@ describe('POST /api/sf/sessions/checkout-direct (con auth y sede)', () => {
     const res = await authedRequest().send({ items: [validItem] });
     expect(res.status).toBe(201);
 
-    // Buscamos los inserts en sf_audit_log mirando `from('sf_audit_log')`
     const auditFromCalls = supabaseMock.calls.filter(
       (c) => c.method === 'from' && c.args[0] === 'sf_audit_log',
     );
-    expect(auditFromCalls.length).toBeGreaterThanOrEqual(2);
+    expect(auditFromCalls.length).toBeGreaterThanOrEqual(1);
   });
 });
