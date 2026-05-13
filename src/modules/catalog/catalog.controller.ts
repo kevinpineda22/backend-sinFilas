@@ -9,6 +9,7 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
   if (!parsed.success) {
     res.status(400).json({
       error: 'validation-error',
+      message: 'Código o búsqueda no válidos',
       detail: parsed.error.issues.map((i) => i.message),
     });
     return;
@@ -37,9 +38,16 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
       if (parsedGs1Weight !== null) {
         supabaseQuery = supabaseQuery.like('siesa_codigos_barras.codigo_barras', `${searchCode}%`);
       } else {
-        supabaseQuery = supabaseQuery.or(
-          `siesa_codigos_barras.codigo_barras.eq.${cleanQuery},siesa_codigos_barras.codigo_barras.eq.${cleanQuery}+,f120_id.eq.${cleanQuery}`,
-        );
+        // f120_id es INT4 en Postgres: si la query no entra (ej. EAN-13),
+        // incluirla en el OR provoca 22P02 "invalid input syntax for type integer"
+        // y devuelve 500 al frontend. Solo la incluimos si cabe en INT4.
+        const fitsInt4 = cleanQuery.length <= 9 && Number(cleanQuery) <= 2147483647;
+        const orClauses = [
+          `siesa_codigos_barras.codigo_barras.eq.${cleanQuery}`,
+          `siesa_codigos_barras.codigo_barras.eq.${cleanQuery}+`,
+        ];
+        if (fitsInt4) orClauses.push(`f120_id.eq.${cleanQuery}`);
+        supabaseQuery = supabaseQuery.or(orClauses.join(','));
       }
     } else {
       const words = cleanQuery.split(/\s+/).filter((w) => w.length > 0);
@@ -51,8 +59,26 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
     const { data, error } = await supabaseQuery.limit(50);
 
     if (error) {
+      // Errores de casteo (ej. número que no cabe en INT) NO son fallas reales:
+      // semánticamente significan "no existe ese producto". Devolvemos array
+      // vacío con 200 para que el frontend muestre "Producto no encontrado"
+      // en lugar de "Error de conexión".
+      const castCodes = ['22P02', '22003', '22023'];
+      const isCastError =
+        (error.code && castCodes.includes(error.code)) ||
+        /invalid input syntax|out of range/i.test(error.message || '');
+
+      if (isCastError) {
+        res.json([]);
+        return;
+      }
+
       console.error('Error en Supabase:', error);
-      res.status(500).json({ error: 'Error consultando catalogo', detail: error.message });
+      res.status(500).json({
+        error: 'catalog-query-failed',
+        message: 'No se pudo consultar el catálogo',
+        detail: error.message,
+      });
       return;
     }
 
@@ -115,6 +141,10 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
     res.json(results);
   } catch (error: any) {
     console.error('Error in searchProduct:', error);
-    res.status(500).json({ error: 'Internal server error', detail: error.message });
+    res.status(500).json({
+      error: 'internal-server-error',
+      message: 'Error inesperado al buscar el producto',
+      detail: error.message,
+    });
   }
 };
