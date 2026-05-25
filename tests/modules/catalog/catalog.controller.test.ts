@@ -185,15 +185,21 @@ describe('GET /api/sf/catalog/search', () => {
     expect(res.body).toEqual([]);
   });
 
-  it('búsqueda NUMÉRICA (tipeo de código): NO aplica el filtro', async () => {
-    // Cuando alguien tipea o escanea un código exacto, devolvemos todas las
-    // presentaciones para que el frontend pueda hacer match.
-    supabaseMock.setNextResult({
-      data: [
-        { f120_id: '185326', f120_descripcion: 'ARROZ', siesa_codigos_barras: { codigo_barras: '7709138700037', unidad_medida: 'UND' } },
-      ],
-      error: null,
-    });
+  it('búsqueda NUMÉRICA (escaneo/tipeo de código): resuelve f120_id y devuelve TODAS las presentaciones', async () => {
+    // Flujo de 2 pasos: el escaneo entrega solo el código de barras. Paso 1
+    // resuelve el f120_id en siesa_codigos_barras; paso 2 trae el producto con
+    // todas sus presentaciones para que el frontend haga el match exacto.
+    supabaseMock.setNextResults([
+      // Paso 1: lookup -> f120_id
+      { data: [{ f120_id: '185326' }], error: null },
+      // Paso 2: producto con todas sus presentaciones
+      {
+        data: [
+          { f120_id: '185326', f120_descripcion: 'ARROZ', siesa_codigos_barras: { codigo_barras: '7709138700037', unidad_medida: 'UND' } },
+        ],
+        error: null,
+      },
+    ]);
 
     const res = await request(app).get('/api/sf/catalog/search').query({ query: '7709138700037' });
 
@@ -201,6 +207,25 @@ describe('GET /api/sf/catalog/search', () => {
     expect(res.body).toHaveLength(1);
     expect(res.body[0].presentaciones).toHaveLength(1);
     expect(res.body[0].presentaciones[0].codigo_barras).toBe('7709138700037');
+  });
+
+  it('búsqueda NUMÉRICA: si el código no existe (paso 1 vacío) devuelve [] sin tocar items_siesa', async () => {
+    // El lookup no encuentra el código -> respondemos [] con 200, NO 500.
+    supabaseMock.setNextResult({ data: [], error: null });
+
+    const res = await request(app).get('/api/sf/catalog/search').query({ query: '9999999999999' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
+  });
+
+  it('búsqueda NUMÉRICA: 500 si el lookup (paso 1) falla', async () => {
+    supabaseMock.setNextResult({ data: null, error: { message: 'connection refused' } });
+
+    const res = await request(app).get('/api/sf/catalog/search').query({ query: '7709138700037' });
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBeDefined();
   });
 
   it('propaga 500 si Supabase devuelve error', async () => {

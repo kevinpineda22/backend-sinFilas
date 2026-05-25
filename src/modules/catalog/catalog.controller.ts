@@ -29,34 +29,85 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
   }
 
   try {
-    let supabaseQuery = supabaseAdmin
-      .from('items_siesa')
-      .select('f120_id, f120_descripcion, siesa_codigos_barras!inner(codigo_barras, unidad_medida)')
-      .eq('activo', true);
+    let result: any;
 
-    if (isNumeric) {
+    if (isNumeric && parsedGs1Weight === null) {
+      // ESCANEO / TIPEO DE CÓDIGO NUMÉRICO (no-GS1) — enfoque en 2 pasos.
+      //
+      // NO se puede filtrar una columna de tabla embebida
+      // (`siesa_codigos_barras.codigo_barras`) dentro de un `.or()` a nivel
+      // raíz: PostgREST responde "failed to parse logic tree" y la query falla
+      // SIEMPRE. Además `f120_id` (raíz) y `codigo_barras` (embebida) son tablas
+      // distintas y no pueden convivir en un mismo `.or()`.
+      //
+      // Paso 1: resolver el/los f120_id buscando el código en
+      // `siesa_codigos_barras`, donde todas las columnas del `.or()` viven en la
+      // MISMA tabla. La cámara entrega solo el código de barras (sin sufijo de
+      // unidad), así que probamos las variantes en que un mismo código aparece:
+      // exacto, venta abierta (`+`) y master/multipack (`M`).
+      const fitsInt4 = cleanQuery.length <= 9 && Number(cleanQuery) <= 2147483647;
+      const orClauses = [
+        `codigo_barras.eq.${cleanQuery}`,
+        `codigo_barras.eq.${cleanQuery}+`,
+        `codigo_barras.eq.M${cleanQuery}`,
+      ];
+      // f120_id es INT4: solo lo incluimos si cabe, para no provocar 22P02.
+      if (fitsInt4) orClauses.push(`f120_id.eq.${cleanQuery}`);
+
+      const { data: hits, error: hitErr } = await supabaseAdmin
+        .from('siesa_codigos_barras')
+        .select('f120_id')
+        .or(orClauses.join(','))
+        .limit(200);
+
+      if (hitErr) {
+        console.error('Error en Supabase (lookup código de barras):', hitErr);
+        res.status(500).json({
+          error: 'catalog-query-failed',
+          message: 'No se pudo consultar el catálogo',
+          detail: hitErr.message,
+        });
+        return;
+      }
+
+      const ids = [...new Set((hits ?? []).map((h: any) => h.f120_id))];
+      if (ids.length === 0) {
+        // El código realmente no existe en el catálogo.
+        res.json([]);
+        return;
+      }
+
+      // Paso 2: traer los productos activos con TODAS sus presentaciones (sin
+      // `!inner`), para que el frontend pueda hacer el match exacto contra la
+      // unidad de medida que corresponda.
+      result = await supabaseAdmin
+        .from('items_siesa')
+        .select('f120_id, f120_descripcion, siesa_codigos_barras(codigo_barras, unidad_medida)')
+        .eq('activo', true)
+        .in('f120_id', ids)
+        .limit(50);
+    } else {
+      // GS1 pesable (`like`) o búsqueda por TEXTO (`ilike`): ambos filtran
+      // columnas que SÍ se pueden expresar directo sobre el recurso o su
+      // tabla embebida, así que la query de un solo paso funciona bien.
+      let supabaseQuery = supabaseAdmin
+        .from('items_siesa')
+        .select('f120_id, f120_descripcion, siesa_codigos_barras!inner(codigo_barras, unidad_medida)')
+        .eq('activo', true);
+
       if (parsedGs1Weight !== null) {
         supabaseQuery = supabaseQuery.like('siesa_codigos_barras.codigo_barras', `${searchCode}%`);
       } else {
-        // f120_id es INT4 en Postgres: si la query no entra (ej. EAN-13),
-        // incluirla en el OR provoca 22P02 "invalid input syntax for type integer"
-        // y devuelve 500 al frontend. Solo la incluimos si cabe en INT4.
-        const fitsInt4 = cleanQuery.length <= 9 && Number(cleanQuery) <= 2147483647;
-        const orClauses = [
-          `siesa_codigos_barras.codigo_barras.eq.${cleanQuery}`,
-          `siesa_codigos_barras.codigo_barras.eq.${cleanQuery}+`,
-        ];
-        if (fitsInt4) orClauses.push(`f120_id.eq.${cleanQuery}`);
-        supabaseQuery = supabaseQuery.or(orClauses.join(','));
+        const words = cleanQuery.split(/\s+/).filter((w) => w.length > 0);
+        words.forEach((word) => {
+          supabaseQuery = supabaseQuery.ilike('f120_descripcion', `%${word}%`);
+        });
       }
-    } else {
-      const words = cleanQuery.split(/\s+/).filter((w) => w.length > 0);
-      words.forEach((word) => {
-        supabaseQuery = supabaseQuery.ilike('f120_descripcion', `%${word}%`);
-      });
+
+      result = await supabaseQuery.limit(50);
     }
 
-    const { data, error } = await supabaseQuery.limit(50);
+    const { data, error } = result;
 
     if (error) {
       // Errores de casteo (ej. número que no cabe en INT) NO son fallas reales:

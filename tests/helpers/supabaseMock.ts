@@ -36,6 +36,7 @@ export type MockedSupabase = {
   update: (...args: unknown[]) => MockedSupabase;
   delete: (...args: unknown[]) => MockedSupabase;
   eq: (...args: unknown[]) => MockedSupabase;
+  in: (...args: unknown[]) => MockedSupabase;
   or: (...args: unknown[]) => MockedSupabase;
   like: (...args: unknown[]) => MockedSupabase;
   ilike: (...args: unknown[]) => MockedSupabase;
@@ -69,7 +70,7 @@ export const createSupabaseMock = (): MockedSupabase => {
     };
   };
 
-  ['from', 'select', 'insert', 'update', 'delete', 'eq', 'or', 'like', 'ilike', 'limit', 'order'].forEach(
+  ['from', 'select', 'insert', 'update', 'delete', 'eq', 'in', 'or', 'like', 'ilike', 'limit', 'order'].forEach(
     register,
   );
 
