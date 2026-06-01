@@ -11,6 +11,60 @@ const rollbackSession = async (sessionId: string): Promise<void> => {
   }
 };
 
+type PasilloInfo = { pasillo: string; pasillo_orden: number };
+
+/**
+ * Resuelve el pasillo de cada producto del carrito para la sede activa,
+ * leyendo la cache `sf_producto_pasillos` (poblada por el sync desde Woo).
+ * Devuelve un Map f120_id → { pasillo, pasillo_orden }.
+ *
+ * Best-effort: ante CUALQUIER error devuelve lo que tenga y el checkout sigue.
+ * Nunca debe tumbar el registro de la sesión.
+ */
+const resolvePasillos = async (
+  sedeId: string,
+  items: Array<{ f120_id?: number }>
+): Promise<Map<number, PasilloInfo>> => {
+  const map = new Map<number, PasilloInfo>();
+  try {
+    const f120Ids = [
+      ...new Set(
+        items
+          .map((i) => i.f120_id)
+          .filter((id): id is number => typeof id === 'number')
+      ),
+    ];
+    if (f120Ids.length === 0) return map;
+
+    const { data: sede } = await supabaseAdmin
+      .from('wc_sedes')
+      .select('slug')
+      .eq('id', sedeId)
+      .single();
+
+    const sedeSlug = (sede as { slug?: string } | null)?.slug;
+    if (!sedeSlug) return map;
+
+    const { data: rows, error } = await supabaseAdmin
+      .from('sf_producto_pasillos')
+      .select('f120_id, pasillo, pasillo_orden')
+      .eq('sede_slug', sedeSlug)
+      .in('f120_id', f120Ids);
+
+    if (error) throw error;
+
+    (rows || []).forEach((r: any) => {
+      map.set(Number(r.f120_id), {
+        pasillo: r.pasillo,
+        pasillo_orden: r.pasillo_orden,
+      });
+    });
+  } catch (err) {
+    console.error('resolvePasillos falló (continúo sin pasillos):', err);
+  }
+  return map;
+};
+
 export const createDirectCheckout = async (req: Request, res: Response): Promise<void> => {
   const parsed = checkoutDirectBodySchema.safeParse(req.body);
 
@@ -53,14 +107,26 @@ export const createDirectCheckout = async (req: Request, res: Response): Promise
     if (sessionError) throw sessionError;
     createdSessionId = session.id;
 
-    // 2. Items
-    const itemsToInsert = items.map((item) => ({
-      session_id: session.id,
-      codigo_barras: item.codigo_barras,
-      nombre_producto: item.nombre,
-      cantidad: item.cantidad,
-      unidad_medida: item.unidad_medida,
-    }));
+    // 1b. Resolver pasillos por sede desde la cache (sf_producto_pasillos).
+    // No es crítico: si algo falla o falta, el ítem queda sin pasillo y el
+    // checkout continúa igual.
+    const pasilloMap = await resolvePasillos(sedeId, items);
+
+    // 2. Items — con posicion (orden de escaneo) y pasillo resuelto.
+    const itemsToInsert = items.map((item, index) => {
+      const info =
+        item.f120_id != null ? pasilloMap.get(item.f120_id) : undefined;
+      return {
+        session_id: session.id,
+        codigo_barras: item.codigo_barras,
+        nombre_producto: item.nombre,
+        cantidad: item.cantidad,
+        unidad_medida: item.unidad_medida,
+        posicion: index,
+        pasillo: info?.pasillo ?? null,
+        pasillo_orden: info?.pasillo_orden ?? null,
+      };
+    });
 
     const { error: itemsError } = await supabaseAdmin
       .from('sf_session_items')

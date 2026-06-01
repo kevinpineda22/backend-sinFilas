@@ -178,8 +178,9 @@ export const getSessionDetail = async (req: Request, res: Response): Promise<voi
 
     const { data: items, error: itemsErr } = await supabaseAdmin
       .from('sf_session_items')
-      .select('codigo_barras, nombre_producto, cantidad, unidad_medida')
-      .eq('session_id', id);
+      .select('codigo_barras, nombre_producto, cantidad, unidad_medida, posicion, pasillo, pasillo_orden')
+      .eq('session_id', id)
+      .order('posicion', { ascending: true, nullsFirst: false });
 
     if (itemsErr) throw itemsErr;
 
@@ -282,6 +283,32 @@ export const getAnalytics = async (req: Request, res: Response): Promise<void> =
       hourly[h].sessions += 1;
     });
 
+    // Agregado de pasillos: cuántos ítems se tomaron por pasillo en el período.
+    // Filtramos por fecha (y sede) sobre la tabla embebida sf_sessions.
+    let pasillosQuery = supabaseAdmin
+      .from('sf_session_items')
+      .select('pasillo, pasillo_orden, sf_sessions!inner(created_at, sede_id)')
+      .gte('sf_sessions.created_at', sinceIso);
+    if (sedeId) pasillosQuery = pasillosQuery.eq('sf_sessions.sede_id', sedeId);
+
+    const { data: pasilloRows, error: pasillosErr } = await pasillosQuery;
+    if (pasillosErr) throw pasillosErr;
+
+    const pasilloMap = new Map<
+      string,
+      { pasillo: string; pasillo_orden: number; items: number }
+    >();
+    (pasilloRows || []).forEach((r: any) => {
+      const key = r.pasillo || 'Sin clasificar';
+      const orden = r.pasillo_orden ?? 999;
+      const cur = pasilloMap.get(key) || { pasillo: key, pasillo_orden: orden, items: 0 };
+      cur.items += 1;
+      pasilloMap.set(key, cur);
+    });
+    const pasillos = Array.from(pasilloMap.values()).sort(
+      (a, b) => a.pasillo_orden - b.pasillo_orden
+    );
+
     res.json({
       since: sinceIso,
       days,
@@ -289,6 +316,7 @@ export const getAnalytics = async (req: Request, res: Response): Promise<void> =
       states,
       topVips,
       hourly,
+      pasillos,
       totals: {
         sessions: rows.length,
         items: rows.reduce((acc, r) => acc + Number(r.total_items || 0), 0),

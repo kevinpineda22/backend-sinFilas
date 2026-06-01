@@ -7,6 +7,10 @@ const itemSchema = z.object({
     .number({ message: 'cantidad debe ser numérica' })
     .positive('cantidad debe ser > 0'),
   unidad_medida: z.string().trim().min(1, 'unidad_medida requerida').default('UND'),
+  // f120_id (id de producto SIESA) — lo manda el carrito y lo usamos para
+  // resolver el pasillo desde sf_producto_pasillos. Opcional: si falta, el ítem
+  // queda sin pasillo (no rompe el checkout).
+  f120_id: z.coerce.number().int().positive().optional(),
 });
 
 export const checkoutDirectBodySchema = z.object({
