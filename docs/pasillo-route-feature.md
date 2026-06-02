@@ -49,11 +49,14 @@ hay un EDITOR en el admin para acomodar los pasillos al plano real de cada sede 
 ?? src/pages/sinFilas/components/SFMapNodes.jsx
 ?? src/pages/sinFilas/views/admin/SFRouteMap.jsx
 ?? src/pages/sinFilas/views/admin/SFStoreMapEditor.jsx
+?? src/pages/sinFilas/views/admin/SFHeatmapPlan.jsx
 ?? src/pages/sinFilas/views/admin/SFStoreMap.css
- M src/pages/sinFilas/views/admin/SFSessionDetailModal.jsx
- M src/pages/sinFilas/views/SFAdminDashboard.jsx
+ M src/pages/sinFilas/views/admin/SFSessionDetailModal.jsx + .css
+ M src/pages/sinFilas/views/admin/SFIntelligenceView.jsx + .css
+ M src/pages/sinFilas/views/SFAdminDashboard.jsx + .css
  M src/pages/sinFilas/api/sfApi.js
 ```
+> Backend: `getAnalytics` ahora devuelve `porSede` → requiere **redeploy** para la comparativa por sede.
 
 **Pendiente opcional:** backfill de sesiones viejas; mapa de calor agregado (Inteligencia) sobre el
 mismo plano 2D (hoy sigue siendo barra horizontal).
@@ -249,9 +252,30 @@ persisten. El layout auto (serpentina desde `orden_ruta`) es solo el punto de pa
 - `views/admin/SFStoreMapEditor.jsx` — **editor**: arrastrar pasillos + entrada/caja, auto-acomodar,
   guardar. Nueva pestaña "Mapa de la tienda" en el panel admin.
 
+### 9.1 Mejoras de Inteligencia (2026-06-02)
+
+- **Selector de sede global en el sidebar** (`SFAdminDashboard`): filtra TODO el panel. "Todas las
+  sedes" usa el centinela `sf_sede_id='todas'` para que el interceptor no mande header (evita el
+  fallback a `ecommerce_sede_id`). El editor de mapa lo consume por prop.
+- **Mapa de calor como plano 2D** (`SFHeatmapPlan`): con sede concreta, pinta el plano de reactflow
+  coloreado por tránsito (reusa `SFMapNodes` + `mergeLayout`). Sin plano armado, o en "Todas", cae a
+  una barra ranked.
+- **Se eliminó el pie de "Distribución por estado"** (dato muerto: el checkout siempre crea
+  `completada`). En su lugar, gráfico adaptativo: "Sesiones por sede" (vista Todas) / "Sesiones por
+  día de semana" (sede concreta).
+- Nuevo KPI "Ítems por sesión"; paleta unificada, tooltips con formato es-CO, estados vacíos.
+- **Comparativa por sede (vista "Todas")**: "Pasillos más calientes por sede" (small multiples,
+  pasillos por NOMBRE — el id no es comparable entre sedes) y "Top productos por sede" (por unidades).
+  En sede concreta, "Top productos" muestra esa sede.
+- Backend `getAnalytics` agrega `porSede`, `pasillosPorSede` y `productosPorSede`. El query de ítems
+  ahora **pagina** (1000/req, hasta 20k) para agregados precisos. Nombres de pasillo se resuelven
+  desde `sf_sede_pasillos` (vía slug de `wc_sedes`).
+
 ### Gotchas
 
 - El visor usa `useNodesState/useEdgesState` y solo PARCHEA `data` por step: así reactflow conserva
   el tamaño medido de los nodos y las flechas no se descolocan.
+- React Flow: definir `nodeTypes` con `useMemo([])` DENTRO de cada componente (no como const de
+  módulo compartida) — evita el warning #002 bajo Fast Refresh de Vite.
 - Pasillos "Sin clasificar"/"Otros" sin nodo en el catálogo se omiten del trazo (se muestra el conteo).
 - Editor requiere una sede CONCRETA (no "todas"); con "todas" devuelve 400 `missing-sede`.

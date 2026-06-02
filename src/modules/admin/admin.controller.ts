@@ -215,6 +215,7 @@ export const getAnalytics = async (req: Request, res: Response): Promise<void> =
         total_items,
         created_at,
         vip_user_id,
+        sede_id,
         profiles ( nombre, correo )
       `
       )
@@ -231,6 +232,7 @@ export const getAnalytics = async (req: Request, res: Response): Promise<void> =
       total_items: number;
       created_at: string;
       vip_user_id: string;
+      sede_id: string | null;
       profiles: { nombre: string | null; correo: string | null } | null;
     };
 
@@ -283,31 +285,131 @@ export const getAnalytics = async (req: Request, res: Response): Promise<void> =
       hourly[h].sessions += 1;
     });
 
-    // Agregado de pasillos: cuántos ítems se tomaron por pasillo en el período.
+    // ---- Ítems del período (paginado, hasta 20k) para los agregados ----
     // Filtramos por fecha (y sede) sobre la tabla embebida sf_sessions.
-    let pasillosQuery = supabaseAdmin
-      .from('sf_session_items')
-      .select('pasillo, pasillo_orden, sf_sessions!inner(created_at, sede_id)')
-      .gte('sf_sessions.created_at', sinceIso);
-    if (sedeId) pasillosQuery = pasillosQuery.eq('sf_sessions.sede_id', sedeId);
+    const ITEM_PAGE = 1000;
+    const itemRows: any[] = [];
+    for (let from = 0; from < 20000; from += ITEM_PAGE) {
+      let iq = supabaseAdmin
+        .from('sf_session_items')
+        .select(
+          'pasillo, pasillo_orden, nombre_producto, codigo_barras, cantidad, sf_sessions!inner(created_at, sede_id)'
+        )
+        .gte('sf_sessions.created_at', sinceIso)
+        .range(from, from + ITEM_PAGE - 1);
+      if (sedeId) iq = iq.eq('sf_sessions.sede_id', sedeId);
+      const { data: page, error: pErr } = await iq;
+      if (pErr) throw pErr;
+      if (!page || page.length === 0) break;
+      itemRows.push(...page);
+      if (page.length < ITEM_PAGE) break;
+    }
 
-    const { data: pasilloRows, error: pasillosErr } = await pasillosQuery;
-    if (pasillosErr) throw pasillosErr;
+    const sessionOf = (r: any) => (Array.isArray(r.sf_sessions) ? r.sf_sessions[0] : r.sf_sessions);
 
-    const pasilloMap = new Map<
-      string,
-      { pasillo: string; pasillo_orden: number; items: number }
-    >();
-    (pasilloRows || []).forEach((r: any) => {
+    // Agregado GLOBAL de pasillos + POR SEDE (pasillos calientes y productos top).
+    const pasilloMap = new Map<string, { pasillo: string; pasillo_orden: number; items: number }>();
+    const pasillosPorSedeMap = new Map<string, Map<string, { pasillo: string; pasillo_orden: number; items: number }>>();
+    const productosPorSedeMap = new Map<string, Map<string, { codigo_barras: string; nombre: string; total: number }>>();
+
+    itemRows.forEach((r: any) => {
+      const sid: string | null = sessionOf(r)?.sede_id ?? null;
       const key = r.pasillo || 'Sin clasificar';
       const orden = r.pasillo_orden ?? 999;
-      const cur = pasilloMap.get(key) || { pasillo: key, pasillo_orden: orden, items: 0 };
-      cur.items += 1;
-      pasilloMap.set(key, cur);
+      const cant = Number(r.cantidad || 0) || 1;
+
+      const g = pasilloMap.get(key) || { pasillo: key, pasillo_orden: orden, items: 0 };
+      g.items += 1;
+      pasilloMap.set(key, g);
+
+      if (!sid) return;
+
+      let pm = pasillosPorSedeMap.get(sid);
+      if (!pm) { pm = new Map(); pasillosPorSedeMap.set(sid, pm); }
+      const ps = pm.get(key) || { pasillo: key, pasillo_orden: orden, items: 0 };
+      ps.items += 1;
+      pm.set(key, ps);
+
+      let prm = productosPorSedeMap.get(sid);
+      if (!prm) { prm = new Map(); productosPorSedeMap.set(sid, prm); }
+      const codigo = r.codigo_barras || 's/c';
+      const pr = prm.get(codigo) || { codigo_barras: codigo, nombre: r.nombre_producto || 'Producto', total: 0 };
+      pr.total += cant;
+      prm.set(codigo, pr);
     });
-    const pasillos = Array.from(pasilloMap.values()).sort(
-      (a, b) => a.pasillo_orden - b.pasillo_orden
-    );
+
+    const pasillos = Array.from(pasilloMap.values()).sort((a, b) => a.pasillo_orden - b.pasillo_orden);
+
+    // ---- Nombres: sedes (wc_sedes) y pasillos (catálogo sf_sede_pasillos) ----
+    const sedeIds = new Set<string>();
+    rows.forEach((r) => r.sede_id && sedeIds.add(r.sede_id));
+    pasillosPorSedeMap.forEach((_v, k) => sedeIds.add(k));
+
+    const sedeInfo = new Map<string, { nombre: string; slug: string }>();
+    if (sedeIds.size > 0) {
+      const { data: sedeRows } = await supabaseAdmin
+        .from('wc_sedes')
+        .select('id, nombre, slug')
+        .in('id', Array.from(sedeIds));
+      (sedeRows || []).forEach((s: any) => sedeInfo.set(s.id, { nombre: s.nombre, slug: s.slug }));
+    }
+
+    const slugs = [...new Set(Array.from(sedeInfo.values()).map((s) => s.slug))];
+    const pasilloNombre = new Map<string, string>(); // `${slug}|${pasillo}` -> nombre
+    if (slugs.length > 0) {
+      const { data: catRows } = await supabaseAdmin
+        .from('sf_sede_pasillos')
+        .select('sede_slug, pasillo, nombre')
+        .in('sede_slug', slugs);
+      (catRows || []).forEach((c: any) => pasilloNombre.set(`${c.sede_slug}|${c.pasillo}`, c.nombre));
+    }
+    const nombreDePasillo = (slug: string, pasillo: string): string => {
+      if (pasillo === 'Otros') return 'Otros';
+      if (pasillo === 'Sin clasificar') return 'Sin clasificar';
+      return (
+        pasilloNombre.get(`${slug}|${pasillo}`) ||
+        (/^\d+$/.test(pasillo) ? `Pasillo ${pasillo}` : pasillo)
+      );
+    };
+
+    // Sesiones e ítems por sede.
+    const sedeAggMap = new Map<string, { sede_id: string; sessions: number; items: number }>();
+    rows.forEach((r) => {
+      if (!r.sede_id) return;
+      const cur = sedeAggMap.get(r.sede_id) || { sede_id: r.sede_id, sessions: 0, items: 0 };
+      cur.sessions += 1;
+      cur.items += Number(r.total_items || 0);
+      sedeAggMap.set(r.sede_id, cur);
+    });
+    const porSede = Array.from(sedeAggMap.values())
+      .map((s) => ({ ...s, nombre: sedeInfo.get(s.sede_id)?.nombre || 'Sede' }))
+      .sort((a, b) => b.sessions - a.sessions);
+
+    // Pasillos más calientes por sede (con nombre legible, top 8).
+    const pasillosPorSede = Array.from(pasillosPorSedeMap.entries())
+      .map(([sid, pm]) => {
+        const info = sedeInfo.get(sid);
+        const slug = info?.slug || '';
+        const lista = Array.from(pm.values())
+          .map((p) => ({ pasillo: p.pasillo, nombre: nombreDePasillo(slug, p.pasillo), items: p.items }))
+          .sort((a, b) => b.items - a.items)
+          .slice(0, 8);
+        const total = lista.reduce((acc, p) => acc + p.items, 0);
+        return { sede_id: sid, sede_nombre: info?.nombre || 'Sede', total, pasillos: lista };
+      })
+      .sort((a, b) => b.total - a.total);
+
+    // Top productos por sede (por unidades, top 8).
+    const productosPorSede = Array.from(productosPorSedeMap.entries())
+      .map(([sid, prm]) => {
+        const info = sedeInfo.get(sid);
+        const lista = Array.from(prm.values())
+          .sort((a, b) => b.total - a.total)
+          .slice(0, 8);
+        const total = lista.reduce((acc, p) => acc + p.total, 0);
+        return { sede_id: sid, sede_nombre: info?.nombre || 'Sede', total, productos: lista };
+      })
+      .sort((a, b) => b.total - a.total);
 
     res.json({
       since: sinceIso,
@@ -317,6 +419,9 @@ export const getAnalytics = async (req: Request, res: Response): Promise<void> =
       topVips,
       hourly,
       pasillos,
+      porSede,
+      pasillosPorSede,
+      productosPorSede,
       totals: {
         sessions: rows.length,
         items: rows.reduce((acc, r) => acc + Number(r.total_items || 0), 0),
