@@ -329,6 +329,148 @@ export const getAnalytics = async (req: Request, res: Response): Promise<void> =
   }
 };
 
+// ============================================================
+// MAPA DE LA TIENDA — catálogo de pasillos + layout (posiciones) por sede
+// ============================================================
+
+const layoutNodeSchema = z.object({
+  nodo_id: z.string().trim().min(1).max(64),
+  tipo: z.enum(['pasillo', 'entrada', 'caja']).default('pasillo'),
+  etiqueta: z.string().trim().max(120).nullish(),
+  x: z.number(),
+  y: z.number(),
+  ancho: z.number().positive().nullish(),
+  alto: z.number().positive().nullish(),
+});
+
+const saveLayoutSchema = z.object({
+  nodos: z.array(layoutNodeSchema).max(200),
+});
+
+/** Resuelve el slug de la sede (wc_sedes) desde el UUID de `req.sedeId`. */
+const resolveSedeSlug = async (sedeId: string | undefined): Promise<string | null> => {
+  if (!sedeId) return null;
+  const { data } = await supabaseAdmin
+    .from('wc_sedes')
+    .select('slug')
+    .eq('id', sedeId)
+    .single();
+  return (data as { slug?: string } | null)?.slug ?? null;
+};
+
+/**
+ * Devuelve el catálogo de pasillos de la sede activa + las posiciones guardadas.
+ * El frontend mergea: para cada pasillo del catálogo busca su nodo guardado;
+ * si no existe, lo auto-posiciona (dagre). Más los nodos especiales entrada/caja.
+ * Requiere una sede concreta (X-Sede-ID); con "todas" no hay layout que mostrar.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export const getSedeLayout = async (req: Request, res: Response): Promise<void> => {
+  try {
+    // El visor de recorrido pasa ?sede_id= (la sede de la sesión), que tiene
+    // prioridad sobre la sede activa del header (el admin puede ver "todas").
+    const q = typeof req.query.sede_id === 'string' ? req.query.sede_id : undefined;
+    const overrideSedeId = q && UUID_RE.test(q) ? q : undefined;
+    const sedeSlug = await resolveSedeSlug(overrideSedeId || req.sedeId);
+    if (!sedeSlug) {
+      res.status(400).json({
+        error: 'missing-sede',
+        detail: 'Seleccioná una sede específica para ver o editar su mapa',
+      });
+      return;
+    }
+
+    const { data: catalogo, error: catErr } = await supabaseAdmin
+      .from('sf_sede_pasillos')
+      .select('pasillo, nombre, pasillo_orden')
+      .eq('sede_slug', sedeSlug)
+      .order('pasillo_orden', { ascending: true });
+    if (catErr) throw catErr;
+
+    const { data: nodos, error: layErr } = await supabaseAdmin
+      .from('sf_sede_layout')
+      .select('nodo_id, tipo, etiqueta, x, y, ancho, alto')
+      .eq('sede_slug', sedeSlug);
+    if (layErr) throw layErr;
+
+    res.json({ sede_slug: sedeSlug, catalogo: catalogo || [], nodos: nodos || [] });
+  } catch (error: any) {
+    console.error('Error en getSedeLayout:', error);
+    res.status(500).json({ error: error.message || 'Error obteniendo el mapa de la sede' });
+  }
+};
+
+/**
+ * Guarda el layout completo de la sede activa (reemplaza el estado anterior).
+ * Estrategia segura: upsert de los nodos entrantes primero (nunca se pierde
+ * data), luego borra los nodos que ya no están en el set. Si el borrado de
+ * obsoletos falla, queda algún nodo de más (inocuo, se limpia al próximo save).
+ */
+export const saveSedeLayout = async (req: Request, res: Response): Promise<void> => {
+  const parsed = saveLayoutSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({
+      error: 'validation-error',
+      detail: parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
+    });
+    return;
+  }
+
+  try {
+    const sedeSlug = await resolveSedeSlug(req.sedeId);
+    if (!sedeSlug) {
+      res.status(400).json({
+        error: 'missing-sede',
+        detail: 'Seleccioná una sede específica para guardar su mapa',
+      });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const rows = parsed.data.nodos.map((n) => ({
+      sede_slug: sedeSlug,
+      nodo_id: n.nodo_id,
+      tipo: n.tipo,
+      etiqueta: n.etiqueta ?? null,
+      x: n.x,
+      y: n.y,
+      ancho: n.ancho ?? null,
+      alto: n.alto ?? null,
+      updated_at: now,
+    }));
+
+    if (rows.length > 0) {
+      const { error: upErr } = await supabaseAdmin
+        .from('sf_sede_layout')
+        .upsert(rows, { onConflict: 'sede_slug,nodo_id' });
+      if (upErr) throw upErr;
+    }
+
+    // Borrar nodos obsoletos (los que ya no manda el editor).
+    const keep = new Set(rows.map((r) => r.nodo_id));
+    const { data: existing } = await supabaseAdmin
+      .from('sf_sede_layout')
+      .select('nodo_id')
+      .eq('sede_slug', sedeSlug);
+    const stale = (existing || [])
+      .map((e: any) => e.nodo_id as string)
+      .filter((id) => !keep.has(id));
+    if (stale.length > 0) {
+      await supabaseAdmin
+        .from('sf_sede_layout')
+        .delete()
+        .eq('sede_slug', sedeSlug)
+        .in('nodo_id', stale);
+    }
+
+    res.json({ success: true, sede_slug: sedeSlug, count: rows.length });
+  } catch (error: any) {
+    console.error('Error en saveSedeLayout:', error);
+    res.status(500).json({ error: error.message || 'Error guardando el mapa de la sede' });
+  }
+};
+
 export const getVipsList = async (req: Request, res: Response): Promise<void> => {
   const sedeId = req.sedeId;
   try {

@@ -1,7 +1,64 @@
 # Feature: Ruta de pasillos del cliente VIP (Sin Filas)
 
 > Documento técnico de referencia. Sirve para retomar el trabajo sin perder contexto.
-> Última actualización: 2026-06-01.
+> Última actualización: 2026-06-02 (mapa interactivo v2).
+
+## 0. PUNTO DE RETOMA (leer primero)
+
+**Estado del feature base (ruta de pasillos):** DESPLEGADO. El backend SF (fases 2/3) ya está
+commiteado y pusheado a Vercel; el catálogo/cache `sf_producto_pasillos` está poblado.
+
+**Lo nuevo (mapa interactivo v2 — recién codeado, sin desplegar):** plano 2D de la tienda con
+reactflow. El recorrido de cada sesión se reproduce animado (play/pausa/scrub) sobre el plano, y
+hay un EDITOR en el admin para acomodar los pasillos al plano real de cada sede y persistirlo.
+
+### Pasos manuales pendientes para v2 (en orden)
+
+1. **Migración DB:** correr `docs/sql/sede-layout.sql` en Supabase (crea `sf_sede_pasillos` y
+   `sf_sede_layout`).
+2. **Re-correr el sync** en `backend-woocommerce` (ahora lee de **`items_siesa`**, ya no de Woo):
+   - Primero MEDIR: `node tools/syncPasilloCache.js --dry` → reporta por sede el % de
+     productos que cae en un pasillo real vs "Otros". Si "Otros" es bajo, seguí.
+   - Poblar: `node tools/syncPasilloCache.js` → llena `sf_producto_pasillos` (pasillo por
+     producto/sede) **y** `sf_sede_pasillos` (catálogo id+nombre+orden, que necesita el editor).
+   Sin esto último el editor de mapa sale vacío.
+3. **Deploy backend SF** (Vercel) — endpoints nuevos `GET/PUT /admin/sede-layout`.
+4. **Deploy frontend** — visor + editor.
+5. **Armar el plano de cada sede:** en el panel admin → "Mapa de la tienda", elegí una sede,
+   arrastrá los pasillos a su lugar real, agregá entrada y caja, y Guardar. Repetir por sede.
+6. **Verificar:** abrir el detalle de una sesión con varios pasillos → "Ruta del cliente" →
+   reproducir la animación del recorrido sobre el plano.
+
+### Archivos del v2 (para commitear)
+
+`Backend-sinFilas`:
+```
+ M src/modules/admin/admin.controller.ts   (getSedeLayout, saveSedeLayout)
+ M src/modules/admin/admin.route.ts
+?? docs/sql/sede-layout.sql
+ M docs/pasillo-route-feature.md
+```
+`backend-woocommerce`:
+```
+ M tools/syncPasilloCache.js   (lee items_siesa + seedSedePasillos + modo --dry)
+ M tools/mapeadorPasillos.js   (keywords dulceria/confiteria/gomitas/caramelo)
+```
+`Pagina-web_React`:
+```
+?? src/pages/sinFilas/utils/storeMapLayout.js
+?? src/pages/sinFilas/components/SFMapNodes.jsx
+?? src/pages/sinFilas/views/admin/SFRouteMap.jsx
+?? src/pages/sinFilas/views/admin/SFStoreMapEditor.jsx
+?? src/pages/sinFilas/views/admin/SFStoreMap.css
+ M src/pages/sinFilas/views/admin/SFSessionDetailModal.jsx
+ M src/pages/sinFilas/views/SFAdminDashboard.jsx
+ M src/pages/sinFilas/api/sfApi.js
+```
+
+**Pendiente opcional:** backfill de sesiones viejas; mapa de calor agregado (Inteligencia) sobre el
+mismo plano 2D (hoy sigue siendo barra horizontal).
+
+---
 
 ## 1. Objetivo
 
@@ -18,10 +75,19 @@ Esto define toda la arquitectura. NO asumir lo contrario.
 | Hecho | Implicancia |
 |---|---|
 | `sf_session_items` guarda solo `codigo_barras, nombre_producto, cantidad, unidad_medida` | No hay categoría ni orden por ítem hoy |
-| El catálogo SF (`items_siesa` / `siesa_codigos_barras`) NO tiene categorías | No se puede mapear pasillo desde SF con datos propios |
-| Las categorías SOLO existen en **WooCommerce** (API en vivo) | Hay que traerlas vía Woo; puente `sku de Woo = f120_id de SIESA` |
+| ~~El catálogo SF NO tiene categorías~~ → **`items_siesa` SÍ tiene `grupo` + `subgrupo`** (taxonomía SIESA, diaria) | **Fuente de categorías actual.** Ver nota de migración abajo |
+| ~~Las categorías SOLO existen en WooCommerce~~ (superado) | Woo era un espejo; SIESA es el ERP origen. Se dejó de depender de la API de Woo |
 | El carrito **fusiona por código de barras** | Es un conjunto, no un timeline. El orden de inserción ≈ orden del primer escaneo de cada producto distinto. Es el mejor proxy de "ruta" que tenemos |
 | `mapeadorPasillos.js` (backend-woocommerce) ya resuelve categoría→pasillo por sede | Reutilizamos esa lógica tal cual, no la reescribimos |
+
+> **Migración de fuente de categorías (2026-06-02):** se pasó de WooCommerce a **`items_siesa.grupo` +
+> `items_siesa.subgrupo`**. Motivo: SIESA es el ERP origen (diario), cubre TODOS los productos —no solo
+> los publicados en Woo— y elimina la dependencia de la API de Woo (sin paginación ni jerarquía de
+> categorías). Se verificó que la taxonomía SIESA matchea casi 1:1 las keywords del `mapeadorPasillos`
+> (DESODORANTE→cuidado_personal, YOGURT→lácteos, CAFE→café, etc.). `mapeadorPasillos` NO se reescribió:
+> sigue siendo el motor categoría→pasillo por sede; solo se le dan `grupo`+`subgrupo` como categorías y
+> se le agregó un puñado de keywords (`dulceria`, `confiteria`, `gomitas`, `caramelo`). Productos con
+> grupo/subgrupo en null caen al match por `f120_descripcion` (fallback que ya existía).
 
 ## 3. Arquitectura elegida
 
@@ -33,13 +99,14 @@ Esto define toda la arquitectura. NO asumir lo contrario.
 
 ```
 SYNC (offline, en backend-woocommerce, on-demand/cron)
+  Leer items_siesa (activos): { f120_id, f120_descripcion, grupo, subgrupo }  [paginado de a 1000]
   Para cada sede activa (wc_sedes):
-    getWooClient(sede_id) → GET products (id, sku, name, categories) [paginado]
-                          → GET products/categories (id, name, parent) [jerarquía]
-    Para cada producto:
-      f120_id = parseInt(sku)
-      { pasillo, prioridad } = obtenerInfoPasillo(categorias, name, sede.slug)
+    seed sf_sede_pasillos (catálogo id+nombre+orden desde SEDES_CONFIG)
+    Para cada producto de items_siesa:
+      categorias = [grupo, subgrupo] (como pseudo-categorías)
+      { pasillo, prioridad } = obtenerInfoPasillo(categorias, f120_descripcion, sede.slug)
       upsert sf_producto_pasillos (f120_id, sede_slug, pasillo, pasillo_orden=prioridad, nombre_producto)
+  (Ya NO se usa la API de WooCommerce. `node tools/syncPasilloCache.js --dry` mide cobertura sin escribir.)
 
 CHECKOUT (en Backend-sinFilas, en vivo, rápido)
   createDirectCheckout:
@@ -90,9 +157,9 @@ alter table sf_session_items
 - Correr `docs/sql/pasillo-route.sql` en el SQL Editor de Supabase.
 
 ### Fase 1 — Sincronizador  ·  responsable: **Claude** (código) + **Usuario** (correr)
-- `backend-woocommerce/tools/syncPasilloCache.js` (nuevo). Reusa `getWooClient`, `obtenerInfoPasillo`, `supabase`.
-- No requiere refactor de `mapeadorPasillos.js`.
-- Correr: `node tools/syncPasilloCache.js` (con el `.env` del backend-woocommerce).
+- `backend-woocommerce/tools/syncPasilloCache.js`. Lee **`items_siesa`** (no Woo) + `obtenerInfoPasillo` + `supabase`.
+- Vuelca también el catálogo `sf_sede_pasillos` (vía `seedSedePasillos`, desde `SEDES_CONFIG`).
+- Medir antes: `node tools/syncPasilloCache.js --dry`. Poblar: `node tools/syncPasilloCache.js`.
 
 ### Fase 2 — Resolver pasillo al checkout  ·  responsable: **Claude**
 - `Backend-sinFilas/src/modules/sessions/sessions.controller.ts` → `createDirectCheckout`.
@@ -145,3 +212,46 @@ alter table sf_session_items
 4. Deploy frontend (Fase 4).
 5. Las rutas aparecen en sesiones creadas DESPUÉS de (2)+(3).
 ```
+
+## 9. Mapa interactivo de la tienda (v2)
+
+Convierte la "ruta del cliente" (lista de paradas) en un **plano 2D interactivo** y agrega un
+editor de layout por sede. Motor: **reactflow v11** (ya instalado, junto con `dagre`,
+`framer-motion`, `konva`). No se sumaron dependencias.
+
+### Por qué hace falta un editor
+
+`mapeadorPasillos.js` NO tiene coordenadas físicas: solo un `orden_ruta` (orden lineal de
+recorrido). Para dibujar un plano fiel a la tienda real, alguien tiene que ubicar cada pasillo una
+vez. En vez de hardcodear coordenadas, el admin las construye arrastrando en un editor y se
+persisten. El layout auto (serpentina desde `orden_ruta`) es solo el punto de partida.
+
+### Datos (2 tablas nuevas — `docs/sql/sede-layout.sql`)
+
+- `sf_sede_pasillos (sede_slug, pasillo, nombre, pasillo_orden)` — **catálogo** de pasillos por
+  sede. Fuente de verdad: `SEDES_CONFIG`. Lo puebla el sync (`seedSedePasillos`).
+- `sf_sede_layout (sede_slug, nodo_id, tipo, etiqueta, x, y, ancho, alto)` — **posiciones** del
+  editor. `tipo` ∈ {pasillo, entrada, caja}. `nodo_id` = id de pasillo o `__entrada__`/`__caja__`.
+
+### Endpoints (Backend-sinFilas, `admin.controller.ts`)
+
+- `GET /admin/sede-layout[?sede_id=UUID]` → `{ sede_slug, catalogo[], nodos[] }`. El visor pasa
+  `sede_id` (la sede de la sesión); el editor usa la sede activa del header `X-Sede-ID`.
+- `PUT /admin/sede-layout` → guarda el layout completo de la sede activa (upsert + borra obsoletos).
+
+### Frontend (`Pagina-web_React/src/pages/sinFilas`)
+
+- `utils/storeMapLayout.js` — serpentina, colapso de paradas (`buildStops`), merge catálogo+posiciones.
+- `components/SFMapNodes.jsx` — nodos custom de reactflow (pasillo / entrada / caja).
+- `views/admin/SFRouteMap.jsx` — **visor**: reproduce el recorrido de una sesión (play/pausa/scrub),
+  resalta pasillo activo, badge de orden de visita, tinte de calor por ítems. Vive en el modal de
+  detalle de sesión.
+- `views/admin/SFStoreMapEditor.jsx` — **editor**: arrastrar pasillos + entrada/caja, auto-acomodar,
+  guardar. Nueva pestaña "Mapa de la tienda" en el panel admin.
+
+### Gotchas
+
+- El visor usa `useNodesState/useEdgesState` y solo PARCHEA `data` por step: así reactflow conserva
+  el tamaño medido de los nodos y las flechas no se descolocan.
+- Pasillos "Sin clasificar"/"Otros" sin nodo en el catálogo se omiten del trazo (se muestra el conteo).
+- Editor requiere una sede CONCRETA (no "todas"); con "todas" devuelve 400 `missing-sede`.
