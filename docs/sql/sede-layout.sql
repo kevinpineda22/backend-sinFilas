@@ -21,6 +21,7 @@ create table if not exists sf_sede_pasillos (
   primary key (sede_slug, pasillo)
 );
 
+
 create index if not exists idx_sf_sede_pasillos_sede
   on sf_sede_pasillos (sede_slug);
 
