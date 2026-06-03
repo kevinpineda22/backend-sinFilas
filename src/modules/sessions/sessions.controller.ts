@@ -122,6 +122,9 @@ export const createDirectCheckout = async (req: Request, res: Response): Promise
         nombre_producto: item.nombre,
         cantidad: item.cantidad,
         unidad_medida: item.unidad_medida,
+        // Guardamos f120_id para poder reconstruir la imagen (desde Woo) al
+        // reabrir la sesión desde el historial. Opcional: si falta, queda null.
+        f120_id: item.f120_id ?? null,
         posicion: index,
         pasillo: info?.pasillo ?? null,
         pasillo_orden: info?.pasillo_orden ?? null,
@@ -190,7 +193,8 @@ export const getUserSessions = async (req: Request, res: Response): Promise<void
           codigo_barras,
           nombre_producto,
           cantidad,
-          unidad_medida
+          unidad_medida,
+          f120_id
         )
       `)
       .eq('vip_user_id', vipUserId)
@@ -214,6 +218,7 @@ export const getUserSessions = async (req: Request, res: Response): Promise<void
         nombre: item.nombre_producto,
         cantidad: item.cantidad,
         unidad_medida: item.unidad_medida,
+        f120_id: item.f120_id ?? null,
       })),
     }));
 
