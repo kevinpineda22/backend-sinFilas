@@ -1,5 +1,29 @@
 import { describe, it, expect } from 'vitest';
-import { isManualSearchPresentation } from '../../../src/modules/catalog/catalog.utils';
+import { isManualSearchPresentation, normalizeBarcode } from '../../../src/modules/catalog/catalog.utils';
+
+describe('normalizeBarcode', () => {
+  it('quita el prefijo M si es seguido por un dígito', () => {
+    expect(normalizeBarcode('M7506105606060')).toBe('7506105606060');
+    expect(normalizeBarcode('M123')).toBe('123');
+  });
+
+  it('no quita el prefijo M si no es seguido por un dígito', () => {
+    expect(normalizeBarcode('MANZANA')).toBe('MANZANA');
+  });
+
+  it('quita el sufijo +', () => {
+    expect(normalizeBarcode('185325+')).toBe('185325');
+  });
+
+  it('quita tanto el prefijo M como el sufijo + si ambos están presentes', () => {
+    expect(normalizeBarcode('M123+')).toBe('123');
+  });
+
+  it('no modifica códigos que no tienen M inicial ni + final', () => {
+    expect(normalizeBarcode('7506105606060')).toBe('7506105606060');
+    expect(normalizeBarcode('185325')).toBe('185325');
+  });
+});
 
 describe('isManualSearchPresentation', () => {
   describe('caso arroz (item 185326)', () => {

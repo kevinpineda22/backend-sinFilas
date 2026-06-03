@@ -6,6 +6,27 @@
 const WEIGHABLE_UNITS = ['KL', 'LB', '500GR', '250GR', 'PZ'];
 
 /**
+ * Normaliza un `codigo_barras` de SIESA a su forma FÍSICA, quitando los
+ * marcadores internos que NUNCA deben salir de la API (ni al QR, ni al
+ * carrito, ni al registro):
+ *
+ *  - Prefijo `M` (master/multipack interno): `M7506105606060` → `7506105606060`.
+ *    Es literalmente `M` + el EAN-13 que lee la cámara.
+ *  - Sufijo `+` (venta abierta interna): `185325+` → `185325`.
+ *
+ * Estos códigos se siguen usando para el LOOKUP del producto (encontrar el
+ * `f120_id`), pero jamás deben devolverse tal cual como presentación.
+ */
+export const normalizeBarcode = (codigo: string): string => {
+  let c = codigo;
+  // Prefijo M solo cuando precede a un dígito (es el marcador interno, no un
+  // código que de casualidad empiece con M).
+  if (/^M\d/.test(c)) c = c.slice(1);
+  if (c.endsWith('+')) c = c.slice(0, -1);
+  return c;
+};
+
+/**
  * Decide si una "presentación" (fila de `siesa_codigos_barras`) es útil para
  * mostrarse al usuario cuando busca por TEXTO (no por escaneo).
  *

@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import { supabaseAdmin } from '../../shared/db/supabaseClient';
 import { searchQuerySchema } from './catalog.schemas';
-import { isManualSearchPresentation } from './catalog.utils';
+import { isManualSearchPresentation, normalizeBarcode } from './catalog.utils';
 
 export const searchProduct = async (req: Request, res: Response): Promise<void> => {
   const parsed = searchQuerySchema.safeParse(req.query);
@@ -149,16 +149,19 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
 
       barras.forEach((b: any) => {
         if (!b) return;
+        // Normalizamos a la forma física: el prefijo `M` y el sufijo `+` son
+        // marcadores internos de SIESA y NUNCA deben salir al carrito/QR.
+        const codigo = normalizeBarcode(b.codigo_barras);
         const um = b.unidad_medida || 'UND';
         const exists = grouped[item.f120_id].presentaciones.find(
-          (p: any) => p.unidad_medida === um && p.codigo_barras === b.codigo_barras,
+          (p: any) => p.unidad_medida === um && p.codigo_barras === codigo,
         );
 
         if (!exists) {
           const isWeighable =
-            ['KL', 'LB', '500GR', '250GR', 'PZ'].includes(um) || b.codigo_barras.startsWith('29');
+            ['KL', 'LB', '500GR', '250GR', 'PZ'].includes(um) || codigo.startsWith('29');
           grouped[item.f120_id].presentaciones.push({
-            codigo_barras: b.codigo_barras,
+            codigo_barras: codigo,
             unidad_medida: um,
             requiere_peso: isWeighable,
           });
