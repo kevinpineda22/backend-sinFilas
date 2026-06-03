@@ -178,7 +178,7 @@ export const getSessionDetail = async (req: Request, res: Response): Promise<voi
 
     const { data: items, error: itemsErr } = await supabaseAdmin
       .from('sf_session_items')
-      .select('codigo_barras, nombre_producto, cantidad, unidad_medida, posicion, pasillo, pasillo_orden')
+      .select('codigo_barras, nombre_producto, cantidad, unidad_medida, posicion, pasillo, pasillo_orden, f120_id')
       .eq('session_id', id)
       .order('posicion', { ascending: true, nullsFirst: false });
 
