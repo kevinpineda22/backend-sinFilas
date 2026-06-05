@@ -8,6 +8,8 @@ const schema = z.object({
   SUPABASE_KEY: z.string().min(1, 'SUPABASE_KEY es requerido'),
   SUPABASE_JWT_SECRET: z.string().optional(),
   QR_SIGNING_SECRET: z.string().optional().default('super-secret-key-123'),
+  SIESA_CONNI_KEY: z.string().min(1, 'SIESA_CONNI_KEY es requerido'),
+  SIESA_CONNI_TOKEN: z.string().min(1, 'SIESA_CONNI_TOKEN es requerido'),
 });
 
 const parsed = schema.safeParse(process.env);

@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { supabaseAdmin } from '../../shared/db/supabaseClient';
+import { env } from '../../config/env';
 import { searchQuerySchema } from './catalog.schemas';
 import { isManualSearchPresentation, normalizeBarcode } from './catalog.utils';
 
@@ -216,12 +217,18 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
     const resultsWithPrice = await Promise.all(results.map(async (prod: any) => {
       let precio: number | null = null;
       try {
-        const url = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=7375&descripcion=merkahorro_pruebas_query_francisco_precios&paginacion=numPag=1|tamPag=100&parametros=item=${prod.f120_id}`;
+        // En algunas APIs en .NET (Connekta / SiesaCloud), mandar chars como '|' o dobles '='
+        // requiere estricta codificación, o bien, debe usarse un objeto URLSearchParams.
+        const encodedParams = encodeURIComponent(`item=${prod.f120_id}`);
+        const encodedPagination = encodeURIComponent('numPag=1|tamPag=100');
+        const url = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=7375&descripcion=merkahorro_pruebas_query_francisco_precios&paginacion=${encodedPagination}&parametros=${encodedParams}`;
         
         const response = await fetch(url, {
           method: 'GET',
           headers: {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'ConniKey': env.SIESA_CONNI_KEY,
+            'ConniToken': env.SIESA_CONNI_TOKEN
           }
         });
 
