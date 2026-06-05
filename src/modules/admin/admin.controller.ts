@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { z } from 'zod';
 import { supabaseAdmin } from '../../shared/db/supabaseClient';
+import { logAudit } from '../../shared/audit/auditWriter';
 
 const ESTADOS = ['en_proceso', 'completada'] as const;
 
@@ -24,6 +25,7 @@ type SessionRow = {
   id: string;
   estado: string;
   total_items: number;
+  total_precio: number | null;
   created_at: string;
   vip_user_id: string;
   sede_id: string | null;
@@ -100,6 +102,7 @@ export const getSessionsHistory = async (req: Request, res: Response): Promise<v
         id,
         estado,
         total_items,
+        total_precio,
         created_at,
         vip_user_id,
         sede_id,
@@ -162,6 +165,7 @@ export const getSessionDetail = async (req: Request, res: Response): Promise<voi
         id,
         estado,
         total_items,
+        total_precio,
         created_at,
         vip_user_id,
         sede_id,
@@ -178,7 +182,7 @@ export const getSessionDetail = async (req: Request, res: Response): Promise<voi
 
     const { data: items, error: itemsErr } = await supabaseAdmin
       .from('sf_session_items')
-      .select('codigo_barras, nombre_producto, cantidad, unidad_medida, posicion, pasillo, pasillo_orden, f120_id')
+      .select('codigo_barras, nombre_producto, cantidad, unidad_medida, posicion, pasillo, pasillo_orden, f120_id, precio_unitario')
       .eq('session_id', id)
       .order('posicion', { ascending: true, nullsFirst: false });
 
@@ -188,6 +192,66 @@ export const getSessionDetail = async (req: Request, res: Response): Promise<voi
   } catch (error: any) {
     console.error('Error en getSessionDetail:', error);
     res.status(500).json({ error: error.message || 'Error obteniendo detalle' });
+  }
+};
+
+/**
+ * Elimina una sesión completa desde el panel admin.
+ *
+ * Validaciones (evitan errores y borrados silenciosos):
+ *  1. El id debe ser un UUID válido (400 si no).
+ *  2. La sesión debe existir (404 si no) — así el frontend distingue
+ *     "ya no estaba" de un fallo real.
+ *
+ * El borrado de `sf_session_items` y `sf_qr_tokens` es automático por las FK
+ * con ON DELETE CASCADE. `sf_audit_log` conserva sus filas (FK SET NULL).
+ * Registramos `session.deleted` con el id en `details` (NO en session_id, que
+ * apuntaría a una fila ya borrada y violaría la FK).
+ */
+export const deleteSession = async (req: Request, res: Response): Promise<void> => {
+  const parsed = detailParamsSchema.safeParse(req.params);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'validation-error', detail: 'id debe ser UUID' });
+    return;
+  }
+
+  const { id } = parsed.data;
+
+  try {
+    const { data: existing, error: findErr } = await supabaseAdmin
+      .from('sf_sessions')
+      .select('id, total_items, total_precio, vip_user_id')
+      .eq('id', id)
+      .single();
+
+    if (findErr || !existing) {
+      res.status(404).json({ error: 'session-not-found', detail: 'La sesión no existe' });
+      return;
+    }
+
+    const { error: delErr } = await supabaseAdmin
+      .from('sf_sessions')
+      .delete()
+      .eq('id', id);
+
+    if (delErr) throw delErr;
+
+    await logAudit({
+      action: 'session.deleted',
+      sessionId: null,
+      userId: req.user?.id ?? null,
+      details: {
+        deleted_session_id: id,
+        total_items: (existing as any).total_items ?? null,
+        total_precio: (existing as any).total_precio ?? null,
+        vip_user_id: (existing as any).vip_user_id ?? null,
+      },
+    });
+
+    res.json({ success: true, id });
+  } catch (error: any) {
+    console.error('Error en deleteSession:', error);
+    res.status(500).json({ error: error.message || 'Error eliminando la sesión' });
   }
 };
 

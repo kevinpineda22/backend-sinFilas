@@ -84,14 +84,13 @@ VIP                 Frontend (sinFilas)        Backend SF          Supabase     
  │                       │                          │   sede_id =        │                │
  │                       │                          │   req.sedeId,      │                │
  │                       │                          │   estado =         │                │
- │                       │                          │   'finalizado')    │                │
+ │                       │                          │  'completada',     │                │
+ │                       │                          │   total_precio)    │                │
  │                       │                          │ INSERT sf_session_ │                │
- │                       │                          │  items (N filas)   │                │
- │                       │                          │ INSERT sf_qr_tokens│                │
- │                       │                          │  (uuid, no expira) │                │
+ │                       │                          │  items (N filas,   │                │
+ │                       │                          │  con precio_unit.) │                │
  │                       │                          │ logAudit:          │                │
  │                       │                          │  session.finalized │                │
- │                       │                          │  qr.generated      │                │
  │                       │                          │───────────────────▶│                │
  │                       │◀─────────────────────────│ { session_id,      │                │
  │                       │                          │   success: true }  │                │
@@ -279,35 +278,30 @@ Buscador devuelve solo:
         - Para items pesables (KL/LB/500GR/250GR) o GS1: línea = codigo_barras
         - Para items normales: línea = `${cantidad}*${codigo_barras}`
         - Une todo con "\r\n"
-   b. Llama a finalizeCheckoutDirect(items, rawQrText)
+   b. Llama a finalizeCheckoutDirect(items, rawQrText, totalPrice) — cada item lleva precio + f120_id
 3. Backend en sessions.controller.ts:
-   a. INSERT sf_sessions (vip_user_id, sede_id, estado='finalizado')
-   b. INSERT sf_session_items (N filas)
-   c. INSERT sf_qr_tokens (token = crypto.randomUUID(), expires_at = '2099-12-31...')
-   d. logAudit('session.finalized')
-   e. logAudit('qr.generated')
-   f. Si falla b o c → DELETE sf_sessions (rollback CASCADE) + logAudit('session.rollback')
-4. Frontend pinta QRCodeSVG con value=rawQrText.
+   a. Calcula total_precio = Σ(precio × cantidad) desde los items (no confía en el total del frontend)
+   b. INSERT sf_sessions (vip_user_id, sede_id, estado='completada', total_items, total_precio)
+   c. Resuelve pasillos por sede desde sf_producto_pasillos (best-effort)
+   d. INSERT sf_session_items (N filas, con precio_unitario, posicion, pasillo, f120_id)
+   e. logAudit('session.finalized')
+   f. Si falla d → DELETE sf_sessions (rollback CASCADE) + logAudit('session.rollback')
+   (No se insertan tokens de QR: sf_qr_tokens no se usa; el QR vive en el frontend.)
+4. Frontend pinta QRCodeSVG con value=rawQrText y muestra el total de la compra.
 ```
 
 ---
 
-## Flujo 7 — Validación en la caja + redeem (POS externo)
+## Flujo 7 — Validación en la caja (POS externo)
 
-Hoy el POS lee la string cruda del QR y la procesa como si fuera el formato del picking. Adicionalmente puede (opcionalmente) marcar la sesión como redimida:
+El POS lee la string cruda del QR y la procesa como si fuera el formato del picking:
 
 ```
 1. POS escanea QR del celular.
 2. POS parsea el string interno y carga el ticket.
-3. (Opcional) POS hace POST /api/sf/sessions/<session_id>/redeem
-     - Backend marca sf_qr_tokens.used_at = now()
-     - Backend pasa sf_sessions.estado a 'cobrado'
-     - Audit log: qr.redeemed
 ```
 
-**El sistema Sin Filas termina en el paso 2.** La redención (paso 3) es opcional y queda solo registrada en BD (`sf_qr_tokens.used_at` y estado `cobrado`) para auditoría futura.
-
-**El panel admin SF NO refleja este estado**: los endpoints `/admin/*` no consultan `sf_qr_tokens`, y las sesiones `cobrado` aparecen como "Registrada" en la UI. La separación es intencional — Sin Filas se ocupa de generar el QR, no de cobrar.
+**El sistema Sin Filas termina en el paso 1 (generación del QR).** NO existe endpoint `/redeem` ni se marca redención en este backend: el cobro ocurre exclusivamente en el POS externo y no se trackea acá. La tabla `sf_qr_tokens` existe en el esquema pero el backend no la escribe, y el enum nunca pasa a `cobrado`. La separación es intencional — Sin Filas se ocupa de generar el QR, no de cobrar.
 
 ---
 

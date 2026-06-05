@@ -118,6 +118,32 @@ describe('POST /api/sf/sessions/checkout-direct (con auth y sede)', () => {
     expect(insertedRow.total_items).toBe(1);
   });
 
+  it('persiste total_precio (Σ precio×cantidad) y precio_unitario por item', async () => {
+    supabaseMock.setNextResults([
+      { data: { id: 'session-precio' }, error: null }, // INSERT sf_sessions
+      { data: null, error: null }, // INSERT sf_session_items
+      { data: null, error: null }, // INSERT sf_audit_log
+    ]);
+
+    const res = await authedRequest().send({
+      items: [
+        { ...validItem, precio: 4500, cantidad: 2 },
+        { ...validItem, codigo_barras: '7700009999999', precio: 1000, cantidad: 1 },
+      ],
+    });
+
+    expect(res.status).toBe(201);
+
+    const insertCalls = supabaseMock.calls.filter((c) => c.method === 'insert');
+    const sessionRow = insertCalls[0].args[0] as Record<string, unknown>;
+    // 4500*2 + 1000*1 = 10000
+    expect(sessionRow.total_precio).toBe(10000);
+
+    const itemRows = insertCalls[1].args[0] as Array<Record<string, unknown>>;
+    expect(itemRows[0].precio_unitario).toBe(4500);
+    expect(itemRows[1].precio_unitario).toBe(1000);
+  });
+
   // ---------- Errores Supabase ----------
   it('retorna 500 si falla la inserción de la sesión (sin rollback porque no hay nada que borrar)', async () => {
     supabaseMock.setNextResult({

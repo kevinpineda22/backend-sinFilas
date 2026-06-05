@@ -68,4 +68,21 @@ describe('sessions.schemas.checkoutDirectBodySchema', () => {
     expect(r.success).toBe(true);
     expect(r.success && r.data.items[0].unidad_medida).toBe('UND');
   });
+
+  it('acepta precio por item y total_price', () => {
+    const r = checkoutDirectBodySchema.safeParse({
+      items: [{ ...validItem, precio: 4500 }],
+      total_price: 4500,
+    });
+    expect(r.success).toBe(true);
+    expect(r.success && r.data.items[0].precio).toBe(4500);
+    expect(r.success && r.data.total_price).toBe(4500);
+  });
+
+  it('rechaza precio negativo', () => {
+    const r = checkoutDirectBodySchema.safeParse({
+      items: [{ ...validItem, precio: -1 }],
+    });
+    expect(r.success).toBe(false);
+  });
 });

@@ -144,16 +144,21 @@ Crea la sesión y todos sus items de una sola vez (Lazy Sync). Inserta también 
       "codigo_barras": "7700001234567",
       "nombre": "ARROZ 500G",
       "cantidad": 3,
-      "unidad_medida": "UND"
+      "unidad_medida": "UND",
+      "f120_id": 185326,
+      "precio": 4500
     },
     {
       "codigo_barras": "2998765012345",
       "nombre": "CARNE RES",
       "cantidad": 1.234,
-      "unidad_medida": "KL"
+      "unidad_medida": "KL",
+      "f120_id": 98765,
+      "precio": 18900
     }
   ],
-  "raw_qr_string": "3*7700001234567\r\n2998765012345"
+  "raw_qr_string": "3*7700001234567\r\n2998765012345",
+  "total_price": 28350
 }
 ```
 
@@ -161,18 +166,22 @@ Crea la sesión y todos sus items de una sola vez (Lazy Sync). Inserta también 
 
 - `vip_user_id` y `sede_id` **NO** se envían en el body — vienen del JWT y del header `X-Sede-ID` respectivamente.
 - `raw_qr_string` se acepta opcionalmente pero **NO se persiste**: el QR lo arma el frontend y lo pinta en pantalla. El backend no persiste ningún token relacionado al QR.
-- El estado de la sesión se inserta directo como `'finalizado'`.
+- `f120_id` (opcional) — id de producto SIESA. Se usa para resolver el pasillo del ítem (cache `sf_producto_pasillos`) y para reconstruir la imagen desde Woo al reabrir la sesión. Si falta, el ítem queda sin pasillo (no rompe el checkout).
+- `precio` (opcional, ≥ 0) — precio unitario que el carrito resolvió contra SIESA al escanear. Se persiste en `sf_session_items.precio_unitario`. Si falta o es 0, queda en 0.
+- `total_price` (opcional, ≥ 0) — total informativo que manda el frontend. **El backend NO confía en él**: recalcula `total_precio = Σ(precio × cantidad)` desde los ítems como única fuente de verdad.
+- El estado de la sesión se inserta directo como `'completada'`.
 - `total_items` = `items.length` (cantidad de líneas).
 - `unidad_medida` tiene default `'UND'` si no se envía.
 - `cantidad` debe ser un `number` positivo.
 
 **Pipeline:**
 
-1. `INSERT INTO sf_sessions (vip_user_id=req.user.id, sede_id=req.sedeId, estado='finalizado', total_items)`
-2. `INSERT INTO sf_session_items (...)` con todos los items
-3. `logAudit('session.finalized')`
+1. `INSERT INTO sf_sessions (vip_user_id=req.user.id, sede_id=req.sedeId, estado='completada', total_items, total_precio)`
+2. Resuelve pasillos por sede desde `sf_producto_pasillos` (best-effort; si falla, los ítems quedan sin pasillo).
+3. `INSERT INTO sf_session_items (...)` con todos los items, incluyendo `precio_unitario`, `posicion`, `pasillo`, `pasillo_orden`, `f120_id`.
+4. `logAudit('session.finalized')`
 
-Si falla el paso **2**, se hace **rollback manual** (`DELETE FROM sf_sessions WHERE id = ?` con CASCADE) y se escribe `session.rollback` en el audit log.
+Si falla el paso **3**, se hace **rollback manual** (`DELETE FROM sf_sessions WHERE id = ?` con CASCADE) y se escribe `session.rollback` en el audit log.
 
 **Response 201:**
 ```json
@@ -213,18 +222,19 @@ Historial de sesiones del VIP autenticado (sus propias sesiones). Es lo que cons
   "data": [
     {
       "id": "uuid",
-      "estado": "finalizado",
+      "estado": "completada",
       "total_items": 3,
+      "total_precio": 13500,
       "created_at": "2026-05-11T14:30:00Z",
       "items": [
-        { "codigo_barras": "185325UND", "nombre": "ARROZ 500G", "cantidad": 3, "unidad_medida": "UND" }
+        { "codigo_barras": "185325UND", "nombre": "ARROZ 500G", "cantidad": 3, "unidad_medida": "UND", "f120_id": 185326, "precio": 4500 }
       ]
     }
   ]
 }
 ```
 
-El response NO incluye ningún token de QR. Si el usuario reabre una sesión del historial, el frontend reconstruye el manifiesto QR localmente con `generateManifestQRValue(items)`.
+`total_precio` (cabecera) y `precio` (por ítem, mapeado desde `precio_unitario`) permiten que el frontend muestre el valor de la compra al reabrir la sesión. El response NO incluye ningún token de QR. Si el usuario reabre una sesión del historial, el frontend reconstruye el manifiesto QR localmente con `generateManifestQRValue(items)`.
 
 ---
 
@@ -276,7 +286,8 @@ Listado paginado de sesiones con filtros.
 
 | Param | Tipo | Default | Notas |
 |---|---|---|---|
-| `estado` | `'finalizado' \| 'cancelado'` | — | Filtra por estado exacto. |
+| `estado` | `'en_proceso' \| 'completada'` | — | Filtra por estado exacto. |
+| `vip_user_id` | uuid | — | Filtra por VIP (lo usa la vista de un VIP puntual). |
 | `search` | string (1-120) | — | Match case-insensitive sobre `profiles.nombre`, `profiles.correo` y el UUID de la sesión. |
 | `limit` | int (1-200) | `50` | Tamaño de página. |
 | `offset` | int (≥0) | `0` | Desplazamiento. |
@@ -287,8 +298,9 @@ Listado paginado de sesiones con filtros.
   "data": [
     {
       "id": "uuid",
-      "estado": "finalizado",
+      "estado": "completada",
       "total_items": 12,
+      "total_precio": 84200,
       "created_at": "2026-05-11T14:30:00Z",
       "vip_user_id": "uuid",
       "sede_id": "uuid",
@@ -315,19 +327,22 @@ Detalle de una sesión + lista de items.
 {
   "session": {
     "id": "uuid",
-    "estado": "finalizado",
+    "estado": "completada",
     "total_items": 3,
+    "total_precio": 32400,
     "created_at": "2026-05-11T14:30:00Z",
     "vip_user_id": "uuid",
     "sede_id": "uuid",
     "profiles": { "nombre": "María García", "correo": "maria@merkahorrosas.com" }
   },
   "items": [
-    { "codigo_barras": "185325UND", "nombre_producto": "ARROZ 500G", "cantidad": 3, "unidad_medida": "UND" },
-    { "codigo_barras": "29987650123 45", "nombre_producto": "CARNE RES", "cantidad": 1.234, "unidad_medida": "KL" }
+    { "codigo_barras": "185325UND", "nombre_producto": "ARROZ 500G", "cantidad": 3, "unidad_medida": "UND", "posicion": 0, "pasillo": "3", "pasillo_orden": 3, "f120_id": 185326, "precio_unitario": 4500 },
+    { "codigo_barras": "2998765012345", "nombre_producto": "CARNE RES", "cantidad": 1.234, "unidad_medida": "KL", "posicion": 1, "pasillo": "7", "pasillo_orden": 7, "f120_id": 98765, "precio_unitario": 18900 }
   ]
 }
 ```
+
+Los items vienen ordenados por `posicion` (orden de escaneo). `precio_unitario` por ítem y `total_precio` en la cabecera alimentan el detalle del panel admin.
 
 **Errores:**
 
@@ -335,6 +350,38 @@ Detalle de una sesión + lista de items.
 |---|---|---|
 | `:id` no es UUID | 400 | `{ "error": "validation-error" }` |
 | Sesión no existe | 404 | `{ "error": "session-not-found" }` |
+
+---
+
+### `DELETE /api/sf/admin/sessions/:id`
+
+Elimina una sesión completa desde el panel admin.
+
+**Auth:** `requireAuth`.
+**Params (Zod):** `id` debe ser UUID.
+
+**Comportamiento (`admin.controller.ts: deleteSession`):**
+
+1. Valida que `:id` sea UUID (400 si no).
+2. Verifica que la sesión exista (404 si no) — así el frontend distingue "ya no estaba" de un fallo real.
+3. `DELETE FROM sf_sessions WHERE id = ?`. Los `sf_session_items` y `sf_qr_tokens` se borran en cascada por sus FK (`ON DELETE CASCADE`). Las filas de `sf_audit_log` se conservan (FK `ON DELETE SET NULL`).
+4. `logAudit('session.deleted')` con `session_id: null` y el id en `details.deleted_session_id` (no se puede referenciar la sesión recién borrada en `session_id` por la FK).
+
+**Response 200:**
+```json
+{ "success": true, "id": "uuid" }
+```
+
+**Errores:**
+
+| Causa | HTTP | Body |
+|---|---|---|
+| Falta `Authorization` | 401 | `{ "error": "unauthorized" }` |
+| `:id` no es UUID | 400 | `{ "error": "validation-error", "detail": "id debe ser UUID" }` |
+| Sesión no existe | 404 | `{ "error": "session-not-found", "detail": "La sesión no existe" }` |
+| Falla Supabase | 500 | `{ "error": "<msg>" }` |
+
+> En el frontend, el borrado se dispara desde el modal de detalle (`SFSessionDetailModal`) con confirmación inline; al completarse refresca KPIs y listado. Un 404 se muestra como "la sesión ya no existe".
 
 ---
 
@@ -384,7 +431,7 @@ Series temporales y rankings para los charts del panel (Recharts).
   "since": "2026-04-11T00:00:00.000Z",
   "days": 30,
   "daily":   [ { "date": "2026-04-11", "sessions": 4, "items": 27 } ],
-  "states":  [ { "estado": "finalizado", "count": 118 }, { "estado": "cancelado", "count": 6 } ],
+  "states":  [ { "estado": "completada", "count": 118 }, { "estado": "en_proceso", "count": 6 } ],
   "topVips": [ { "vip_user_id": "uuid", "nombre": "María", "correo": "maria@...", "sessions": 14, "items": 162 } ],
   "hourly":  [ { "hour": 0, "sessions": 0 }, { "hour": 9, "sessions": 12 } ],
   "totals":  { "sessions": 124, "items": 1843, "vips": 7 }
@@ -406,7 +453,9 @@ Estructuras:
 |---|---|---|
 | Auth en `/admin/*` | ✅ Cerrado | `requireAuth + optionalSede`. |
 | Filtro por sede en `/admin/*` | ✅ Cerrado | `optionalSede`: con `X-Sede-ID` filtra, sin él → global. |
-| Endpoint `GET /admin/sessions/:id` con items | ✅ Cerrado | Detalle + items. |
+| Endpoint `GET /admin/sessions/:id` con items | ✅ Cerrado | Detalle + items (incluye precios y pasillos). |
+| Endpoint `DELETE /admin/sessions/:id` | ✅ Cerrado | Borra sesión con validación de existencia + audit `session.deleted`. |
+| Persistencia de precios | ✅ Cerrado | `precio_unitario` por ítem + `total_precio` por sesión (recalculado server-side). |
 | Analítica para charts | ✅ Cerrado | `/admin/analytics` con `daily`, `hourly`, `states`, `topVips`. |
 | Endpoint `POST /sessions/:id/cancel` | ⏳ Pendiente | Para mover sesión a `cancelado` desde el panel. Hoy `cancelado` solo se setea desde BD. |
 | Auth/secret en `/sessions/:id/redeem` | ⏳ Pendiente | Hoy abierto; aceptable mientras la URL no esté pública. |

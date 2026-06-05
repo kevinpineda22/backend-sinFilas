@@ -6,7 +6,8 @@ export type AuditAction =
   | 'session.cancelled'
   | 'qr.generated'
   | 'qr.redeemed'
-  | 'session.rollback';
+  | 'session.rollback'
+  | 'session.deleted';
 
 export type AuditEvent = {
   action: AuditAction | string;

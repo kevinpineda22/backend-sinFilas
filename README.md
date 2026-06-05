@@ -37,17 +37,20 @@ Express 5 + TypeScript, deploy serverless en Vercel.
 - **Auth:** `requireAuth` valida el JWT de Supabase con `jsonwebtoken` localmente (sin llamada HTTP a Supabase por request) e inyecta `req.user = { id, email, role }`.
 - **Sede:** `requireSede` lee `X-Sede-ID`, valida UUID e inyecta `req.sedeId`.
 - **Validación:** Zod en bodies/queries/params (schemas por módulo).
-- **Audit:** `logAudit()` escribe en `sf_audit_log` para eventos clave (`session.finalized`, `qr.generated`, `qr.redeemed`, `session.rollback`).
+- **Audit:** `logAudit()` escribe en `sf_audit_log` para eventos clave (`session.finalized`, `session.rollback`, `session.deleted`).
+- **Precios:** al hacer checkout se persiste `precio_unitario` por ítem y `total_precio` por sesión (este último **recalculado en el backend** desde los ítems, no se confía en el total del frontend). Se exponen en el historial del VIP y en el panel admin.
 - **Endpoints activos:**
   - `GET /api/sf/health`
-  - `GET /api/sf/catalog/search` — con filtro de presentaciones útiles para búsqueda manual
-  - `POST /api/sf/sessions/checkout-direct` — con auth + sede + Zod + rollback transaccional
-  - `GET /api/sf/sessions` — historial del VIP autenticado
+  - `GET /api/sf/catalog/search` — con filtro de presentaciones útiles para búsqueda manual + precio por producto (lista de la sede vía SIESA)
+  - `POST /api/sf/sessions/checkout-direct` — con auth + sede + Zod + rollback transaccional; persiste precios y pasillos
+  - `GET /api/sf/sessions` — historial del VIP autenticado (incluye precios)
   - `GET /api/sf/admin/stats` — KPIs del panel
-  - `GET /api/sf/admin/sessions` — listado con filtros (`estado`, `search`, `limit`, `offset`)
-  - `GET /api/sf/admin/sessions/:id` — detalle de la sesión + items
+  - `GET /api/sf/admin/sessions` — listado con filtros (`estado`, `vip_user_id`, `search`, `limit`, `offset`)
+  - `GET /api/sf/admin/sessions/:id` — detalle de la sesión + items (con precios y pasillos)
+  - `DELETE /api/sf/admin/sessions/:id` — elimina una sesión con validación de existencia
   - `GET /api/sf/admin/cancelled` — sesiones canceladas
   - `GET /api/sf/admin/analytics` — series para charts (`?days=30`)
+  - `GET|PUT /api/sf/admin/sede-layout` — catálogo de pasillos + plano 2D por sede
 - Todas las rutas `/admin/*` protegidas con `requireAuth + optionalSede` (filtra por `X-Sede-ID` si se envía).
 - **El sistema termina en la generación del QR.** No hay endpoint de cobro/redención: la caja lee el QR como string crudo y el flujo de cobro ocurre exclusivamente en el POS externo.
 - **CORS:** abierto a cualquier origen + OPTIONS preflight.
@@ -56,11 +59,13 @@ Express 5 + TypeScript, deploy serverless en Vercel.
 
 PostgreSQL compartido con `backend-woocommerce`. Tablas con prefijo `sf_`:
 
-- `sf_sessions` — cabecera del carrito (ENUM `sf_session_state`: `en_proceso`, `finalizado`, `cancelado`. El valor `cobrado` permanece en la definición del enum por compatibilidad histórica pero el código nunca lo escribe).
-- `sf_session_items` — items escaneados/pesados.
+- `sf_sessions` — cabecera del carrito. Incluye `total_precio`. ENUM `sf_session_state`: el código solo escribe `en_proceso` (default) y `completada`; los valores legacy `finalizado`/`cobrado`/`cancelado` quedan inertes si tu definición del tipo aún los tiene.
+- `sf_session_items` — items escaneados/pesados. Incluye `precio_unitario`, `posicion`, `pasillo`, `pasillo_orden`, `f120_id`.
 - `sf_audit_log` — bitácora; ya se escribe desde el backend.
+- `sf_qr_tokens` — existe en el esquema pero el backend no la usa (el QR se reconstruye en el frontend). Su FK `ON DELETE CASCADE` se aprovecha al borrar sesiones.
+- `sf_producto_pasillos`, `sf_sede_pasillos`, `sf_sede_layout` — mapa de la tienda (pasillos + plano 2D por sede).
 
-Detalles y SQL canónico en [`docs/06-supabase-setup.sql`](./docs/06-supabase-setup.sql). Si tu proyecto venía de una versión anterior con `sf_qr_tokens`, mirá [`docs/08-migration-remove-cobros.sql`](./docs/08-migration-remove-cobros.sql).
+Detalles y SQL canónico en [`docs/06-supabase-setup.sql`](./docs/06-supabase-setup.sql) y [`docs/02-base-de-datos.md`](./docs/02-base-de-datos.md).
 
 ## 2. Decisiones arquitectónicas clave
 
@@ -112,6 +117,8 @@ QR_SIGNING_SECRET=          # opcional, uso futuro
 | Auth en `/admin/*` | ✅ Cerrado (`requireAuth + optionalSede` aplicados con `router.use`) |
 | Dashboard admin con filtro de sede | ✅ Cerrado (`optionalSede` filtra por `X-Sede-ID`; sin header → vista global) |
 | Panel admin con vistas reales | ✅ Cerrado (Sesiones / Canceladas / Inteligencia + modal detalle) |
+| Persistencia de precios (ítem + total) | ✅ Cerrado (`precio_unitario` + `total_precio` recalculado server-side; visible en QR, historial VIP y panel admin) |
+| Borrado de sesiones desde admin | ✅ Cerrado (`DELETE /admin/sessions/:id` con validación de existencia + audit `session.deleted`) |
 | `tsconfig` strict | ⚠️ Parcial (`noImplicitAny` + `strictNullChecks` ON, `strict` aún en `false`) |
 | Tests | ✅ Vitest + supertest verdes (sin la suite de redeem que fue removida) |
 | Refactor a capas service/repository | ⏳ Pendiente |

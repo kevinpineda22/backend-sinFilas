@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import {
+  deleteSession,
   getAnalytics,
   getCancelledSessions,
   getDashboardStats,
@@ -21,6 +22,7 @@ router.get('/stats', getDashboardStats);
 router.get('/vips', getVipsList);
 router.get('/sessions', getSessionsHistory);
 router.get('/sessions/:id', getSessionDetail);
+router.delete('/sessions/:id', deleteSession);
 router.get('/cancelled', getCancelledSessions);
 router.get('/analytics', getAnalytics);
 router.get('/sede-layout', getSedeLayout);

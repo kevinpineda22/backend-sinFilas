@@ -11,6 +11,10 @@ const itemSchema = z.object({
   // resolver el pasillo desde sf_producto_pasillos. Opcional: si falta, el ítem
   // queda sin pasillo (no rompe el checkout).
   f120_id: z.coerce.number().int().positive().optional(),
+  // precio unitario (lista de la sede) que el carrito ya resolvió contra SIESA
+  // al escanear. Lo persistimos en sf_session_items.precio_unitario. Opcional:
+  // si falta o viene 0 (producto sin precio en la lista), queda en 0.
+  precio: z.coerce.number().nonnegative().optional(),
 });
 
 export const checkoutDirectBodySchema = z.object({
@@ -18,6 +22,9 @@ export const checkoutDirectBodySchema = z.object({
   vip_user_id: z.string().uuid('vip_user_id debe ser uuid').optional(),
   sede_id: z.string().uuid('sede_id debe ser uuid').optional(),
   raw_qr_string: z.string().optional(),
+  // total enviado por el frontend (informativo). El backend NO confía en él:
+  // recalcula total_precio desde los precios unitarios de los ítems.
+  total_price: z.coerce.number().nonnegative().optional(),
 });
 
 export type CheckoutDirectBody = z.infer<typeof checkoutDirectBodySchema>;

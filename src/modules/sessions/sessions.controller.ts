@@ -91,6 +91,14 @@ export const createDirectCheckout = async (req: Request, res: Response): Promise
 
   let createdSessionId: string | null = null;
 
+  // total_precio = Σ (precio_unitario × cantidad). Lo calcula el backend (no
+  // confía en el total que manda el frontend) para que sea la única fuente de
+  // verdad. Productos sin precio en la lista suman 0.
+  const totalPrecio = items.reduce(
+    (acc, it) => acc + Number(it.precio || 0) * Number(it.cantidad || 0),
+    0
+  );
+
   try {
     // 1. Sesión
     const { data: session, error: sessionError } = await supabaseAdmin
@@ -100,6 +108,7 @@ export const createDirectCheckout = async (req: Request, res: Response): Promise
         sede_id: sedeId,
         estado: 'completada',
         total_items: items.length,
+        total_precio: totalPrecio,
       })
       .select()
       .single();
@@ -128,6 +137,7 @@ export const createDirectCheckout = async (req: Request, res: Response): Promise
         posicion: index,
         pasillo: info?.pasillo ?? null,
         pasillo_orden: info?.pasillo_orden ?? null,
+        precio_unitario: item.precio ?? 0,
       };
     });
 
@@ -188,13 +198,15 @@ export const getUserSessions = async (req: Request, res: Response): Promise<void
         id,
         estado,
         total_items,
+        total_precio,
         created_at,
         sf_session_items (
           codigo_barras,
           nombre_producto,
           cantidad,
           unidad_medida,
-          f120_id
+          f120_id,
+          precio_unitario
         )
       `)
       .eq('vip_user_id', vipUserId)
@@ -212,6 +224,7 @@ export const getUserSessions = async (req: Request, res: Response): Promise<void
       id: session.id,
       estado: session.estado,
       total_items: session.total_items,
+      total_precio: Number(session.total_precio ?? 0),
       created_at: session.created_at,
       items: session.sf_session_items.map((item: any) => ({
         codigo_barras: item.codigo_barras,
@@ -219,6 +232,7 @@ export const getUserSessions = async (req: Request, res: Response): Promise<void
         cantidad: item.cantidad,
         unidad_medida: item.unidad_medida,
         f120_id: item.f120_id ?? null,
+        precio: Number(item.precio_unitario ?? 0),
       })),
     }));
 
