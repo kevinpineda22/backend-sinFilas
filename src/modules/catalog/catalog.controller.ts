@@ -192,7 +192,69 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
       // sentido mostrarlo en el buscador.
       .filter((prod: any) => isNumeric || prod.presentaciones.length > 0);
 
-    res.json(results);
+    // Fetch prices from SIESA API
+    let reqSedeSlug: string | undefined;
+    if (req.sedeId) {
+      const { data: sede } = await supabaseAdmin
+        .from('wc_sedes')
+        .select('slug')
+        .eq('id', req.sedeId)
+        .single();
+      reqSedeSlug = sede?.slug;
+    }
+
+    const SEDE_PRICE_LIST_MAP: Record<string, string> = {
+      'barbosa': 'P06',
+      'copacabana-plaza': 'P01',
+      'girardota': 'P03',
+      'villahermosa': 'P02' // villahermosa
+    };
+
+    // Mapeo: P01 por defecto si no hay sede (Copacabana)
+    const targetList = reqSedeSlug ? SEDE_PRICE_LIST_MAP[reqSedeSlug] : undefined;
+
+    const resultsWithPrice = await Promise.all(results.map(async (prod: any) => {
+      let precio: number | null = null;
+      try {
+        const url = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=7375&descripcion=merkahorro_pruebas_query_francisco_precios&paginacion=numPag=1|tamPag=100&parametros=item=${prod.f120_id}`;
+        
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
+
+        if (response.ok) {
+          const json = await response.json();
+          if (json.codigo === 0 && json.detalle?.Datos) {
+            const datos = json.detalle.Datos;
+            if (targetList) {
+              const foundList = datos.find((x: any) => x.ListaPrecio === targetList);
+              if (foundList) {
+                precio = foundList.Precio;
+              }
+            } else {
+              const defaultList = datos.find((x: any) => x.ListaPrecio === 'P01') || datos[0];
+              if (defaultList) {
+                precio = defaultList.Precio;
+              }
+            }
+          }
+        } else {
+          console.warn(`Error de red SIESA al obtener precio del ítem ${prod.f120_id}: HTTP ${response.status}`);
+        }
+      } catch (err) {
+        console.error(`Error buscando precio para ítem ${prod.f120_id}:`, err);
+      }
+      
+      return {
+        ...prod,
+        precio
+      };
+    }));
+
+    res.json(resultsWithPrice);
   } catch (error: any) {
     console.error('Error in searchProduct:', error);
     res.status(500).json({
