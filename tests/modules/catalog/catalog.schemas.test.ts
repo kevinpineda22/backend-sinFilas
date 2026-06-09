@@ -19,9 +19,15 @@ describe('catalog.schemas.searchQuerySchema', () => {
     expect(r.success).toBe(false);
   });
 
-  it('rechaza query menor a 2 chars', () => {
-    const r = searchQuerySchema.safeParse({ query: 'a' });
-    expect(r.success).toBe(false);
+  it('acepta query de 1 carácter (ítems con código de 1 dígito, ej fruver)', () => {
+    const r = searchQuerySchema.safeParse({ query: '2' });
+    expect(r.success).toBe(true);
+    expect(r.success && r.data.query).toBe('2');
+  });
+
+  it('rechaza query vacía (o solo espacios)', () => {
+    expect(searchQuerySchema.safeParse({ query: '' }).success).toBe(false);
+    expect(searchQuerySchema.safeParse({ query: '   ' }).success).toBe(false);
   });
 
   it('rechaza query mayor a 100 chars', () => {

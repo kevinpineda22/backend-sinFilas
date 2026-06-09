@@ -24,9 +24,14 @@ describe('GET /api/sf/catalog/search', () => {
     expect(res.body.error).toBe('validation-error');
   });
 
-  it('retorna 400 si query es muy corta', async () => {
-    const res = await request(app).get('/api/sf/catalog/search').query({ query: 'a' });
+  it('retorna 400 si query está vacía', async () => {
+    const res = await request(app).get('/api/sf/catalog/search').query({ query: '' });
     expect(res.status).toBe(400);
+  });
+
+  it('acepta query de 1 carácter (ítems con código de 1 dígito, ej fruver)', async () => {
+    const res = await request(app).get('/api/sf/catalog/search').query({ query: '2' });
+    expect(res.status).toBe(200);
   });
 
   it('busca por nombre y agrupa por f120_id (solo presentaciones útiles)', async () => {
