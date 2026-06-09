@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isManualSearchPresentation, normalizeBarcode } from '../../../src/modules/catalog/catalog.utils';
+import { isManualSearchPresentation, normalizeBarcode, unitsPerPresentation } from '../../../src/modules/catalog/catalog.utils';
 
 describe('normalizeBarcode', () => {
   it('quita el prefijo M si es seguido por un dígito', () => {
@@ -22,6 +22,40 @@ describe('normalizeBarcode', () => {
   it('no modifica códigos que no tienen M inicial ni + final', () => {
     expect(normalizeBarcode('7506105606060')).toBe('7506105606060');
     expect(normalizeBarcode('185325')).toBe('185325');
+  });
+});
+
+describe('unitsPerPresentation', () => {
+  it('devuelve el número de un paquete P<n>', () => {
+    expect(unitsPerPresentation('P15')).toBe(15); // cubeta de huevos
+    expect(unitsPerPresentation('P30')).toBe(30); // cartón de huevos
+    expect(unitsPerPresentation('P6')).toBe(6);   // sixpack
+    expect(unitsPerPresentation('P25')).toBe(25);
+    expect(unitsPerPresentation('P100')).toBe(100);
+  });
+
+  it('devuelve 1 para unidad suelta', () => {
+    expect(unitsPerPresentation('UND')).toBe(1);
+  });
+
+  it('devuelve 1 para pesables (el precio es por kilo, la cantidad es el peso)', () => {
+    expect(unitsPerPresentation('KL')).toBe(1);
+    expect(unitsPerPresentation('LB')).toBe(1);
+    expect(unitsPerPresentation('PZ')).toBe(1);
+  });
+
+  it('es tolerante a minúsculas y espacios', () => {
+    expect(unitsPerPresentation(' p15 ')).toBe(15);
+    expect(unitsPerPresentation('p6')).toBe(6);
+  });
+
+  it('devuelve 1 ante null, undefined o formatos no reconocidos', () => {
+    expect(unitsPerPresentation(null)).toBe(1);
+    expect(unitsPerPresentation(undefined)).toBe(1);
+    expect(unitsPerPresentation('')).toBe(1);
+    expect(unitsPerPresentation('PACK')).toBe(1);
+    expect(unitsPerPresentation('P')).toBe(1);
+    expect(unitsPerPresentation('P0')).toBe(1); // un paquete de 0 no tiene sentido → 1
   });
 });
 

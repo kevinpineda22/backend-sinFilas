@@ -166,6 +166,9 @@ describe('GET /api/sf/catalog/search', () => {
       codigo_barras: '2900061',
       unidad_medida: 'KL',
       requiere_peso: true,
+      // SIESA no responde en el entorno de test (sin llaves) → precio queda null.
+      // El precio por presentación se proyecta del base, que acá es null.
+      precio: null,
     });
   });
 

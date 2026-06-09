@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { supabaseAdmin } from '../../shared/db/supabaseClient';
 import { env } from '../../config/env';
 import { searchQuerySchema } from './catalog.schemas';
-import { isManualSearchPresentation, normalizeBarcode } from './catalog.utils';
+import { isManualSearchPresentation, normalizeBarcode, unitsPerPresentation } from './catalog.utils';
 
 export const searchProduct = async (req: Request, res: Response): Promise<void> => {
   const parsed = searchQuerySchema.safeParse(req.query);
@@ -255,9 +255,21 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
         console.error(`Error buscando precio para ítem ${prod.f120_id}:`, err);
       }
       
+      // SIESA cobra el precio por SKU (= 1 unidad base). Acá lo proyectamos a
+      // cada presentación multiplicando por su factor de paquete: una cubeta
+      // `P15` cuesta `precio × 15`, un suelto `UND` cuesta `precio × 1`, y un
+      // pesable `KL` mantiene el precio POR KILO (factor 1). El frontend toma
+      // el precio de la PRESENTACIÓN escaneada, no del grupo.
+      const presentaciones = (prod.presentaciones || []).map((p: any) => ({
+        ...p,
+        precio: precio == null ? null : precio * unitsPerPresentation(p.unidad_medida),
+      }));
+
       return {
         ...prod,
-        precio
+        // `precio` (base, 1 unidad) se mantiene por compatibilidad y referencia.
+        precio,
+        presentaciones,
       };
     }));
 

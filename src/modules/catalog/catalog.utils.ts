@@ -27,6 +27,28 @@ export const normalizeBarcode = (codigo: string): string => {
 };
 
 /**
+ * Cuántas unidades base contiene una presentación. SIESA cobra el precio por
+ * el `f120_id` (SKU base = 1 unidad), pero un mismo SKU se vende también en
+ * paquetes: `P15` = cubeta de 15, `P30` = cartón de 30, `P6` = sixpack, etc.
+ *
+ * Devuelve el multiplicador para obtener el precio de la presentación a partir
+ * del precio base:  precio_presentacion = precio_base × unitsPerPresentation(um).
+ *
+ *  - `P<n>` (P2, P6, P15, P30...) → n   (paquete de n unidades)
+ *  - `UND`, `KL`, `LB`, pesables, o cualquier otra → 1
+ *
+ * Los pesables (KL/LB) devuelven 1 a propósito: ahí el precio es POR KILO y la
+ * "cantidad" del carrito es el peso (0.515), no un multiplicador de paquete.
+ */
+export const unitsPerPresentation = (unidadMedida: string | null | undefined): number => {
+  if (!unidadMedida) return 1;
+  const match = /^P(\d+)$/.exec(unidadMedida.trim().toUpperCase());
+  if (!match) return 1;
+  const n = parseInt(match[1], 10);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+};
+
+/**
  * Decide si una "presentación" (fila de `siesa_codigos_barras`) es útil para
  * mostrarse al usuario cuando busca por TEXTO (no por escaneo).
  *
