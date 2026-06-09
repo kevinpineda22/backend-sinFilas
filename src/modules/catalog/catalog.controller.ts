@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { supabaseAdmin } from '../../shared/db/supabaseClient';
 import { env } from '../../config/env';
 import { searchQuerySchema } from './catalog.schemas';
-import { isManualSearchPresentation, normalizeBarcode, unitsPerPresentation } from './catalog.utils';
+import { isManualSearchPresentation, normalizeBarcode } from './catalog.utils';
 
 export const searchProduct = async (req: Request, res: Response): Promise<void> => {
   const parsed = searchQuerySchema.safeParse(req.query);
@@ -215,14 +215,20 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
     const targetList = reqSedeSlug ? SEDE_PRICE_LIST_MAP[reqSedeSlug] : undefined;
 
     const resultsWithPrice = await Promise.all(results.map(async (prod: any) => {
-      let precio: number | null = null;
+      // SIESA devuelve el precio REAL por (ListaPrecio, Unidad): cada SKU trae
+      // una fila por cada presentación (UND, P15, P30, KL...) con su precio ya
+      // resuelto —incluido el descuento por volumen del paquete—. NO se
+      // multiplica: la cubeta P15 NO es 15× la unidad (ej: huevo UND=$750 pero
+      // P15=$10.400, no $11.250). Armamos un mapa Unidad → Precio para la lista
+      // de la sede y se lo asignamos a cada presentación por su unidad_medida.
+      const priceByUnit: Record<string, number> = {};
       try {
         // En algunas APIs en .NET (Connekta / SiesaCloud), mandar chars como '|' o dobles '='
         // requiere estricta codificación, o bien, debe usarse un objeto URLSearchParams.
         const encodedParams = encodeURIComponent(`item=${prod.f120_id}`);
         const encodedPagination = encodeURIComponent('numPag=1|tamPag=100');
         const url = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=7375&descripcion=merkahorro_pruebas_query_francisco_precios&paginacion=${encodedPagination}&parametros=${encodedParams}`;
-        
+
         const response = await fetch(url, {
           method: 'GET',
           headers: {
@@ -234,17 +240,24 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
 
         if (response.ok) {
           const json = await response.json();
-          if (json.codigo === 0 && json.detalle?.Datos) {
+          if (json.codigo === 0 && Array.isArray(json.detalle?.Datos)) {
             const datos = json.detalle.Datos;
-            if (targetList) {
-              const foundList = datos.find((x: any) => x.ListaPrecio === targetList);
-              if (foundList) {
-                precio = foundList.Precio;
-              }
-            } else {
-              const defaultList = datos.find((x: any) => x.ListaPrecio === 'P01') || datos[0];
-              if (defaultList) {
-                precio = defaultList.Precio;
+            // Lista de precios objetivo: la de la sede, o P01 por defecto.
+            const listasDisponibles = new Set(
+              datos.map((d: any) => String(d.ListaPrecio ?? '').trim()),
+            );
+            const listaUsada =
+              targetList && listasDisponibles.has(targetList)
+                ? targetList
+                : listasDisponibles.has('P01')
+                  ? 'P01'
+                  : String(datos[0]?.ListaPrecio ?? '').trim();
+
+            // SIESA trae `Unidad`/`ListaPrecio` con espacios → trim + upper.
+            for (const d of datos) {
+              if (String(d.ListaPrecio ?? '').trim() === listaUsada) {
+                const um = String(d.Unidad ?? '').trim().toUpperCase();
+                if (um) priceByUnit[um] = Number(d.Precio);
               }
             }
           }
@@ -254,21 +267,19 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
       } catch (err) {
         console.error(`Error buscando precio para ítem ${prod.f120_id}:`, err);
       }
-      
-      // SIESA cobra el precio por SKU (= 1 unidad base). Acá lo proyectamos a
-      // cada presentación multiplicando por su factor de paquete: una cubeta
-      // `P15` cuesta `precio × 15`, un suelto `UND` cuesta `precio × 1`, y un
-      // pesable `KL` mantiene el precio POR KILO (factor 1). El frontend toma
-      // el precio de la PRESENTACIÓN escaneada, no del grupo.
-      const presentaciones = (prod.presentaciones || []).map((p: any) => ({
-        ...p,
-        precio: precio == null ? null : precio * unitsPerPresentation(p.unidad_medida),
-      }));
+
+      // Precio real por presentación, matcheando su unidad_medida con SIESA.
+      // Si SIESA no tiene precio para esa unidad, queda en null (no inventamos).
+      const presentaciones = (prod.presentaciones || []).map((p: any) => {
+        const um = String(p.unidad_medida ?? '').trim().toUpperCase();
+        const precioPres = priceByUnit[um];
+        return { ...p, precio: precioPres != null ? precioPres : null };
+      });
 
       return {
         ...prod,
-        // `precio` (base, 1 unidad) se mantiene por compatibilidad y referencia.
-        precio,
+        // `precio` de grupo = precio de la unidad base (UND) como referencia.
+        precio: priceByUnit['UND'] ?? null,
         presentaciones,
       };
     }));
