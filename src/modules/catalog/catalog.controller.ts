@@ -193,26 +193,19 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
       // sentido mostrarlo en el buscador.
       .filter((prod: any) => isNumeric || prod.presentaciones.length > 0);
 
-    // Fetch prices from SIESA API
-    let reqSedeSlug: string | undefined;
+    // Lista de precios SIESA por sede. Vive en `wc_sedes.lista_precio_siesa`
+    // (data-driven): agregar una sede es solo datos, sin tocar este código. Si la
+    // sede no tiene lista configurada, `targetList` queda undefined y más abajo se
+    // cae a P01 (Copacabana) como referencia.
+    let targetList: string | undefined;
     if (req.sedeId) {
       const { data: sede } = await supabaseAdmin
         .from('wc_sedes')
-        .select('slug')
+        .select('lista_precio_siesa')
         .eq('id', req.sedeId)
         .single();
-      reqSedeSlug = sede?.slug;
+      targetList = sede?.lista_precio_siesa ?? undefined;
     }
-
-    const SEDE_PRICE_LIST_MAP: Record<string, string> = {
-      'barbosa': 'P06',
-      'copacabana-plaza': 'P01',
-      'girardota': 'P03',
-      'villahermosa': 'P02' // villahermosa
-    };
-
-    // Mapeo: P01 por defecto si no hay sede (Copacabana)
-    const targetList = reqSedeSlug ? SEDE_PRICE_LIST_MAP[reqSedeSlug] : undefined;
 
     const resultsWithPrice = await Promise.all(results.map(async (prod: any) => {
       // SIESA devuelve el precio REAL por (ListaPrecio, Unidad): cada SKU trae
