@@ -9,8 +9,12 @@ const sessionsQuerySchema = z.object({
   estado: z.enum(ESTADOS).optional(),
   vip_user_id: z.string().uuid().optional(),
   search: z.string().trim().min(1).max(120).optional(),
-  limit: z.coerce.number().int().min(1).max(200).default(50),
-  offset: z.coerce.number().int().min(0).default(0),
+  limit: z.coerce.number().int().min(1).max(200).default(25),
+  // Cursor keyset: `created_at` de la última fila ya vista. Pedimos las
+  // anteriores a ese instante. A diferencia de offset, NO escanea-y-descarta:
+  // va directo al índice de created_at, así que la página 1 cuesta lo mismo que
+  // la 1000. Opaco para el cliente: lo recibe en `nextCursor` y lo devuelve tal cual.
+  before: z.string().min(1).optional(),
 });
 
 const detailParamsSchema = z.object({
@@ -41,38 +45,52 @@ export const getDashboardStats = async (req: Request, res: Response): Promise<vo
   try {
     const sedeId = req.sedeId;
 
-    const sessionsBase = supabaseAdmin
-      .from('sf_sessions')
-      .select('estado, total_items, vip_user_id, created_at');
-
-    const { data: rows, error } = await applySedeFilter(sessionsBase, sedeId);
-    if (error) throw error;
-
-    const sessions = (rows || []) as Array<{
-      estado: string;
-      total_items: number;
-      vip_user_id: string;
-      created_at: string;
-    }>;
-
-    const totalSessions = sessions.length;
-    const totalItems = sessions.reduce((acc, s) => acc + Number(s.total_items || 0), 0);
-    const activeVips = new Set(sessions.map((s) => s.vip_user_id)).size;
-    const cancelled = 0;
-    const registered = sessions.length;
-
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
-    const sessionsToday = sessions.filter(
-      (s) => new Date(s.created_at).getTime() >= startOfDay.getTime()
-    ).length;
+    const startIso = startOfDay.toISOString();
+
+    // Conteos del lado de la DB con `head: true`: NO transfiere filas, solo
+    // devuelve el número. Antes se traían TODAS las sesiones a memoria solo para
+    // hacer `.length`/`.reduce` — inviable a escala. (Inlineamos el filtro de
+    // sede en vez de usar `applySedeFilter` para no disparar la recursión de
+    // tipos del builder de `count`.)
+    let totalQuery = supabaseAdmin
+      .from('sf_sessions')
+      .select('*', { count: 'exact', head: true });
+    if (sedeId) totalQuery = totalQuery.eq('sede_id', sedeId);
+
+    let todayQuery = supabaseAdmin
+      .from('sf_sessions')
+      .select('*', { count: 'exact', head: true })
+      .gte('created_at', startIso);
+    if (sedeId) todayQuery = todayQuery.eq('sede_id', sedeId);
+
+    // Suma de items y VIPs únicos: supabase-js no agrega sin un RPC, así que
+    // traemos SOLO esas dos columnas (liviano) y agregamos en memoria. Si esto
+    // escala a cientos de miles de filas, el próximo paso es una función RPC en
+    // Postgres que devuelva todo agregado en una sola fila.
+    let aggQuery = supabaseAdmin
+      .from('sf_sessions')
+      .select('total_items, vip_user_id');
+    if (sedeId) aggQuery = aggQuery.eq('sede_id', sedeId);
+
+    const [totalRes, todayRes, aggRes] = await Promise.all([totalQuery, todayQuery, aggQuery]);
+    if (totalRes.error) throw totalRes.error;
+    if (todayRes.error) throw todayRes.error;
+    if (aggRes.error) throw aggRes.error;
+
+    const aggRows = (aggRes.data || []) as Array<{ total_items: number; vip_user_id: string }>;
+    const totalSessions = totalRes.count ?? aggRows.length;
+    const sessionsToday = todayRes.count ?? 0;
+    const totalItems = aggRows.reduce((acc, s) => acc + Number(s.total_items || 0), 0);
+    const activeVips = new Set(aggRows.map((s) => s.vip_user_id)).size;
 
     res.json({
       totalSessions,
       totalItems,
       activeVips,
-      cancelled,
-      registered,
+      cancelled: 0,
+      registered: totalSessions,
       sessionsToday,
     });
   } catch (error: any) {
@@ -91,10 +109,41 @@ export const getSessionsHistory = async (req: Request, res: Response): Promise<v
     return;
   }
 
-  const { estado, vip_user_id, search, limit, offset } = parsed.data;
+  const { estado, vip_user_id, search, limit, before } = parsed.data;
   const sedeId = req.sedeId;
+  const isFirstPage = !before;
 
   try {
+    // Búsqueda por nombre/correo: el filtro DEBE resolverse en la DB ANTES de
+    // paginar. Antes se filtraba en memoria sobre la página ya cortada (.range),
+    // así que solo encontraba coincidencias dentro de esas `limit` filas: si el
+    // VIP buscado caía en otra página, no aparecía nunca.
+    //
+    // Como nombre/correo viven en la tabla embebida `profiles`, resolvemos
+    // primero los vip_user_id cuyo perfil matchea y filtramos `sf_sessions` por
+    // esos ids. Si el término es un UUID, además lo probamos como id de sesión.
+    let searchUserIds: string[] | null = null;
+    let searchIsUuid = false;
+    if (search) {
+      searchIsUuid = UUID_RE.test(search);
+      const { data: matchedProfiles, error: profErr } = await supabaseAdmin
+        .from('profiles')
+        .select('id')
+        .or(`nombre.ilike.%${search}%,correo.ilike.%${search}%`);
+      if (profErr) throw profErr;
+      searchUserIds = (matchedProfiles || []).map((p: any) => p.id as string);
+
+      // Si no matchea ningún perfil y tampoco es un id de sesión, no hay nada
+      // que traer: evitamos una query inútil.
+      if (searchUserIds.length === 0 && !searchIsUuid) {
+        res.json({ data: [], total: 0 });
+        return;
+      }
+    }
+
+    // El `count: 'exact'` (que escanea todo para contar) solo se pide en la
+    // PRIMERA página, para el "Mostrando X de Y". En cada "Cargar más" se omite:
+    // así el load-more queda 100% keyset, sin recontar nada.
     let query = supabaseAdmin
       .from('sf_sessions')
       .select(
@@ -108,31 +157,40 @@ export const getSessionsHistory = async (req: Request, res: Response): Promise<v
         sede_id,
         profiles ( nombre, correo )
       `,
-        { count: 'exact' }
+        isFirstPage ? { count: 'exact' } : undefined
       )
-      .order('created_at', { ascending: false });
+      .order('created_at', { ascending: false })
+      .limit(limit);
 
-    query = applySedeFilter(query, sedeId);
+    if (sedeId) query = query.eq('sede_id', sedeId);
     if (estado) query = query.eq('estado', estado);
     if (vip_user_id) query = query.eq('vip_user_id', vip_user_id);
 
-    query = query.range(offset, offset + limit - 1);
+    if (searchUserIds) {
+      const orParts: string[] = [];
+      if (searchUserIds.length > 0) orParts.push(`vip_user_id.in.(${searchUserIds.join(',')})`);
+      if (searchIsUuid) orParts.push(`id.eq.${search}`);
+      // `.or(...)` se combina con AND respecto a los demás filtros (sede/estado).
+      query = query.or(orParts.join(','));
+    }
+
+    // Keyset: traemos las filas anteriores al cursor. Combina con AND.
+    if (before) query = query.lt('created_at', before);
 
     const { data, error, count } = await query;
     if (error) throw error;
 
-    let rows = (data || []) as unknown as SessionRow[];
+    const rows = (data || []) as unknown as SessionRow[];
+    // Si trajimos una página completa, asumimos que hay más y el cursor es el
+    // created_at de la última fila. Si vino incompleta, se acabó.
+    const nextCursor = rows.length === limit ? rows[rows.length - 1].created_at : null;
 
-    if (search) {
-      const needle = search.toLowerCase();
-      rows = rows.filter((s) => {
-        const nombre = s.profiles?.nombre?.toLowerCase() || '';
-        const correo = s.profiles?.correo?.toLowerCase() || '';
-        return nombre.includes(needle) || correo.includes(needle) || s.id.includes(needle);
-      });
-    }
-
-    res.json({ data: rows, total: count ?? rows.length });
+    res.json({
+      data: rows,
+      total: isFirstPage ? count ?? rows.length : undefined,
+      nextCursor,
+      hasMore: nextCursor !== null,
+    });
   } catch (error: any) {
     console.error('Error en getSessionsHistory:', error);
     res.status(500).json({ error: error.message || 'Error obteniendo historial' });
@@ -145,6 +203,91 @@ export const getCancelledSessions = async (req: Request, res: Response): Promise
   } catch (error: any) {
     console.error('Error en getCancelledSessions:', error);
     res.status(500).json({ error: error.message || 'Error obteniendo canceladas' });
+  }
+};
+
+const deletedQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(25),
+  before: z.string().min(1).optional(), // cursor keyset por created_at del audit log
+});
+
+/**
+ * Lista las sesiones ELIMINADAS desde el panel admin.
+ *
+ * Como `deleteSession` hace borrado físico (DELETE + CASCADE), las filas de
+ * `sf_sessions` ya no existen — no hay nada que listar ahí. Pero el audit log
+ * registró cada borrado (`action='session.deleted'`) con los totales y el VIP en
+ * `details`. Reconstruimos la vista desde ahí: cero migración, dato ya guardado.
+ *
+ * Paginación keyset igual que el historial (cursor `before` por created_at).
+ */
+export const getDeletedSessions = async (req: Request, res: Response): Promise<void> => {
+  const parsed = deletedQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({
+      error: 'validation-error',
+      detail: parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
+    });
+    return;
+  }
+
+  const { limit, before } = parsed.data;
+
+  try {
+    let query = supabaseAdmin
+      .from('sf_audit_log')
+      .select('id, created_at, user_id, details')
+      .eq('action', 'session.deleted')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (before) query = query.lt('created_at', before);
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    const rows = (data || []) as Array<{
+      id: string;
+      created_at: string;
+      user_id: string | null;
+      details: Record<string, any> | null;
+    }>;
+
+    const items = rows.map((r) => ({
+      audit_id: r.id,
+      deleted_at: r.created_at,
+      deleted_by: r.user_id,
+      session_id: r.details?.deleted_session_id ?? null,
+      total_items: r.details?.total_items ?? null,
+      total_precio: r.details?.total_precio ?? null,
+      vip_user_id: r.details?.vip_user_id ?? null,
+      vip_nombre: null as string | null,
+      vip_correo: null as string | null,
+    }));
+
+    // Resolvemos nombre/correo del VIP dueño de cada sesión borrada (bounded por
+    // el tamaño de página) para que la vista no muestre solo UUIDs.
+    const vipIds = [...new Set(items.map((i) => i.vip_user_id).filter(Boolean))] as string[];
+    if (vipIds.length > 0) {
+      const { data: profs } = await supabaseAdmin
+        .from('profiles')
+        .select('id, nombre, correo')
+        .in('id', vipIds);
+      const nameMap = new Map<string, { nombre: string | null; correo: string | null }>();
+      (profs || []).forEach((p: any) => nameMap.set(p.id, { nombre: p.nombre, correo: p.correo }));
+      items.forEach((i) => {
+        if (!i.vip_user_id) return;
+        const p = nameMap.get(i.vip_user_id);
+        i.vip_nombre = p?.nombre ?? null;
+        i.vip_correo = p?.correo ?? null;
+      });
+    }
+
+    const nextCursor = rows.length === limit ? rows[rows.length - 1].created_at : null;
+    res.json({ data: items, nextCursor, hasMore: nextCursor !== null });
+  } catch (error: any) {
+    console.error('Error en getDeletedSessions:', error);
+    res.status(500).json({ error: error.message || 'Error obteniendo sesiones eliminadas' });
   }
 };
 

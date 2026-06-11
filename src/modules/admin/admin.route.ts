@@ -4,6 +4,7 @@ import {
   getAnalytics,
   getCancelledSessions,
   getDashboardStats,
+  getDeletedSessions,
   getSedeLayout,
   getSessionDetail,
   getSessionsHistory,
@@ -24,6 +25,7 @@ router.get('/sessions', getSessionsHistory);
 router.get('/sessions/:id', getSessionDetail);
 router.delete('/sessions/:id', deleteSession);
 router.get('/cancelled', getCancelledSessions);
+router.get('/deleted', getDeletedSessions);
 router.get('/analytics', getAnalytics);
 router.get('/sede-layout', getSedeLayout);
 router.put('/sede-layout', saveSedeLayout);

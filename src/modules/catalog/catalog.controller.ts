@@ -1,8 +1,8 @@
 import { Request, Response } from 'express';
 import { supabaseAdmin } from '../../shared/db/supabaseClient';
-import { env } from '../../config/env';
 import { searchQuerySchema } from './catalog.schemas';
 import { isManualSearchPresentation, normalizeBarcode } from './catalog.utils';
+import { getItemPrices } from './priceCache';
 
 export const searchProduct = async (req: Request, res: Response): Promise<void> => {
   const parsed = searchQuerySchema.safeParse(req.query);
@@ -214,52 +214,20 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
       // multiplica: la cubeta P15 NO es 15× la unidad (ej: huevo UND=$750 pero
       // P15=$10.400, no $11.250). Armamos un mapa Unidad → Precio para la lista
       // de la sede y se lo asignamos a cada presentación por su unidad_medida.
-      const priceByUnit: Record<string, number> = {};
-      try {
-        // En algunas APIs en .NET (Connekta / SiesaCloud), mandar chars como '|' o dobles '='
-        // requiere estricta codificación, o bien, debe usarse un objeto URLSearchParams.
-        const encodedParams = encodeURIComponent(`item=${prod.f120_id}`);
-        const encodedPagination = encodeURIComponent('numPag=1|tamPag=100');
-        const url = `https://servicios.siesacloud.com/api/connekta/v3/ejecutarconsulta?idCompania=7375&descripcion=merkahorro_pruebas_query_francisco_precios&paginacion=${encodedPagination}&parametros=${encodedParams}`;
+      //
+      // El fetch a SIESA vive ahora en `priceCache.getItemPrices`: cachea por
+      // ítem (TTL 5 min) para no repetir la misma llamada HTTP en cada búsqueda.
+      const pricesByList = await getItemPrices(prod.f120_id);
 
-        const response = await fetch(url, {
-          method: 'GET',
-          headers: {
-            'Content-Type': 'application/json',
-            'ConniKey': env.SIESA_CONNI_KEY,
-            'ConniToken': env.SIESA_CONNI_TOKEN
-          }
-        });
-
-        if (response.ok) {
-          const json = await response.json();
-          if (json.codigo === 0 && Array.isArray(json.detalle?.Datos)) {
-            const datos = json.detalle.Datos;
-            // Lista de precios objetivo: la de la sede, o P01 por defecto.
-            const listasDisponibles = new Set(
-              datos.map((d: any) => String(d.ListaPrecio ?? '').trim()),
-            );
-            const listaUsada =
-              targetList && listasDisponibles.has(targetList)
-                ? targetList
-                : listasDisponibles.has('P01')
-                  ? 'P01'
-                  : String(datos[0]?.ListaPrecio ?? '').trim();
-
-            // SIESA trae `Unidad`/`ListaPrecio` con espacios → trim + upper.
-            for (const d of datos) {
-              if (String(d.ListaPrecio ?? '').trim() === listaUsada) {
-                const um = String(d.Unidad ?? '').trim().toUpperCase();
-                if (um) priceByUnit[um] = Number(d.Precio);
-              }
-            }
-          }
-        } else {
-          console.warn(`Error de red SIESA al obtener precio del ítem ${prod.f120_id}: HTTP ${response.status}`);
-        }
-      } catch (err) {
-        console.error(`Error buscando precio para ítem ${prod.f120_id}:`, err);
-      }
+      // Lista de precios objetivo: la de la sede, o P01 por defecto, o la primera.
+      const listaUsada =
+        targetList && pricesByList[targetList]
+          ? targetList
+          : pricesByList['P01']
+            ? 'P01'
+            : Object.keys(pricesByList)[0];
+      const priceByUnit: Record<string, number> =
+        (listaUsada && pricesByList[listaUsada]) || {};
 
       // Precio real por presentación, matcheando su unidad_medida con SIESA.
       // Si SIESA no tiene precio para esa unidad, queda en null (no inventamos).
