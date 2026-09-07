@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import { supabaseAdmin } from '../../shared/db/supabaseClient';
 import { searchQuerySchema } from './catalog.schemas';
-import { isManualSearchPresentation, normalizeBarcode } from './catalog.utils';
+import { esUnidadPesable, isManualSearchPresentation, normalizeBarcode } from './catalog.utils';
 import { getItemPrices } from './priceCache';
 
 export const searchProduct = async (req: Request, res: Response): Promise<void> => {
@@ -159,8 +159,11 @@ export const searchProduct = async (req: Request, res: Response): Promise<void> 
         );
 
         if (!exists) {
-          const isWeighable =
-            ['KL', 'LB', '500GR', '250GR', 'PZ'].includes(um) || codigo.startsWith('29');
+          // `esUnidadPesable` compara en la forma canónica. La lista literal
+          // que estaba acá era una cuarta copia de las unidades de peso y no
+          // toleraba `"kl"` ni espacios: ese producto salía con
+          // `requiere_peso: false` y el frontend no abría el modal de peso.
+          const isWeighable = esUnidadPesable(um) || codigo.startsWith('29');
           grouped[item.f120_id].presentaciones.push({
             codigo_barras: codigo,
             unidad_medida: um,

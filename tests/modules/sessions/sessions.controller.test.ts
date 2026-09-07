@@ -101,13 +101,20 @@ describe('POST /api/sf/sessions/checkout-direct (con auth y sede)', () => {
     supabaseMock.setNextResults([
       { data: { id: 'session-uuid-1' }, error: null }, // INSERT sf_sessions .select().single()
       { data: null, error: null }, // INSERT sf_session_items
+      // SELECT siesa_codigos_barras — verificación del QR. El código del ítem
+      // existe en el maestro, así que no hay nada que reportar.
+      { data: [{ codigo_barras: validItem.codigo_barras }], error: null },
       { data: null, error: null }, // INSERT sf_audit_log session.finalized
     ]);
 
     const res = await authedRequest().send({ items: [validItem] });
 
     expect(res.status).toBe(201);
-    expect(res.body).toEqual({ session_id: 'session-uuid-1', success: true });
+    expect(res.body).toEqual({
+      session_id: 'session-uuid-1',
+      success: true,
+      verificacion_qr: { verificado: true, items_no_verificados: [] },
+    });
 
     const sessionInsertCall = supabaseMock.calls.find((c) => c.method === 'insert');
     expect(sessionInsertCall).toBeDefined();
@@ -118,10 +125,87 @@ describe('POST /api/sf/sessions/checkout-direct (con auth y sede)', () => {
     expect(insertedRow.total_items).toBe(1);
   });
 
+  // ---------- Verificación del QR contra SIESA ----------
+  //
+  // El frontend arma el QR y solo puede probar un código por procedencia. Acá
+  // tenemos `siesa_codigos_barras` delante, que es lo que la caja exige.
+  // Verificar es INFORMAR, no autorizar: el checkout se registra igual.
+  describe('verificación del QR', () => {
+    it('reporta el código que no existe en SIESA, y registra la sesión igual', async () => {
+      supabaseMock.setNextResults([
+        { data: { id: 'session-qr' }, error: null }, // INSERT sf_sessions
+        { data: null, error: null }, // INSERT sf_session_items
+        { data: [], error: null }, // SELECT: el código no está en el maestro
+        { data: null, error: null }, // INSERT sf_audit_log
+      ]);
+
+      const res = await authedRequest().send({ items: [validItem] });
+
+      // La sesión se crea: un falso negativo acá dejaría a un cliente parado
+      // en la fila sin poder pagar.
+      expect(res.status).toBe(201);
+      expect(res.body.session_id).toBe('session-qr');
+      expect(res.body.verificacion_qr).toEqual({
+        verificado: true,
+        items_no_verificados: [
+          {
+            codigo_barras: validItem.codigo_barras,
+            nombre: validItem.nombre,
+            motivo: 'no_registrado',
+          },
+        ],
+      });
+    });
+
+    it('consulta el maestro con las variantes internas de SIESA', async () => {
+      supabaseMock.setNextResults([
+        { data: { id: 'session-var' }, error: null },
+        { data: null, error: null },
+        { data: [{ codigo_barras: `${validItem.codigo_barras}+` }], error: null },
+        { data: null, error: null },
+      ]);
+
+      const res = await authedRequest().send({ items: [validItem] });
+
+      // La tabla guarda `185325+` y `M7702…`. Buscar solo la forma física
+      // daría "no existe" sobre un código perfectamente real.
+      const inCall = supabaseMock.calls.find((c) => c.method === 'in');
+      expect(inCall!.args[0]).toBe('codigo_barras');
+      expect(inCall!.args[1]).toEqual([
+        '7700001234567',
+        '7700001234567+',
+        'M7700001234567',
+        'N7700001234567',
+      ]);
+      // Y el código guardado con `+` cuenta como encontrado.
+      expect(res.body.verificacion_qr.items_no_verificados).toEqual([]);
+    });
+
+    it('devuelve verificado:false si la consulta falla, sin tumbar el checkout', async () => {
+      supabaseMock.setNextResults([
+        { data: { id: 'session-err' }, error: null }, // INSERT sf_sessions
+        { data: null, error: null }, // INSERT sf_session_items
+        { data: null, error: { message: 'supabase caído' } }, // SELECT falla
+        { data: null, error: null }, // INSERT sf_audit_log
+      ]);
+
+      const res = await authedRequest().send({ items: [validItem] });
+
+      expect(res.status).toBe(201);
+      // "No pude verificar" NO es "está todo bien": la pantalla dice cuál de
+      // las dos cosas pasó, y por eso la lista va vacía y la bandera en false.
+      expect(res.body.verificacion_qr).toEqual({
+        verificado: false,
+        items_no_verificados: [],
+      });
+    });
+  });
+
   it('persiste total_precio (Σ precio×cantidad) y precio_unitario por item', async () => {
     supabaseMock.setNextResults([
       { data: { id: 'session-precio' }, error: null }, // INSERT sf_sessions
       { data: null, error: null }, // INSERT sf_session_items
+      { data: [], error: null }, // SELECT siesa_codigos_barras (verificación)
       { data: null, error: null }, // INSERT sf_audit_log
     ]);
 

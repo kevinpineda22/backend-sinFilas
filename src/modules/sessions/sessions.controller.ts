@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { supabaseAdmin } from '../../shared/db/supabaseClient';
 import { logAudit } from '../../shared/audit/auditWriter';
 import { checkoutDirectBodySchema } from './sessions.schemas';
+import { verificarItemsContraSiesa } from '../../shared/qr/verificarCodigos';
 
 const rollbackSession = async (sessionId: string): Promise<void> => {
   try {
@@ -147,16 +148,38 @@ export const createDirectCheckout = async (req: Request, res: Response): Promise
 
     if (itemsError) throw itemsError;
 
+    // 3. Verificación del QR contra `siesa_codigos_barras`.
+    //
+    // El frontend arma el QR y solo puede probar un código por procedencia
+    // ("me lo devolvió el catálogo"). Acá tenemos la tabla delante, que es lo
+    // que la caja realmente exige. Es la misma regla que blinda el picking.
+    //
+    // Corre DESPUÉS de insertar: la sesión ya está registrada pase lo que
+    // pase. Verificar es informar, no autorizar — un falso negativo dejaría a
+    // un cliente parado en la fila sin poder pagar.
+    const verificacion = await verificarItemsContraSiesa(items);
+
     await logAudit({
       action: 'session.finalized',
       sessionId: session.id,
       userId: vipUserId,
-      details: { sede_id: sedeId, total_items: items.length },
+      details: {
+        sede_id: sedeId,
+        total_items: items.length,
+        // Queda en el audit log para poder auditar después cuántos productos
+        // se están yendo a digitación manual y por qué.
+        qr_verificado: verificacion.verificado,
+        qr_items_no_verificados: verificacion.items_no_verificados,
+      },
     });
 
     res.status(201).json({
       session_id: session.id,
       success: true,
+      // El frontend lo muestra junto al QR, sumado a lo que ya detectó él.
+      // `verificado: false` significa "no pude verificar", que NO es lo mismo
+      // que "está todo bien", y la pantalla dice cuál de las dos cosas pasó.
+      verificacion_qr: verificacion,
     });
   } catch (error: any) {
     console.error('Error en createDirectCheckout:', error);

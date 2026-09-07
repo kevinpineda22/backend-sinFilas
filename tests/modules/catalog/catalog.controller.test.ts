@@ -7,6 +7,16 @@ vi.mock('../../../src/shared/db/supabaseClient', async () => {
   return { supabaseAdmin: createSupabaseMock() };
 });
 
+// SIESA no puede vivir en la suite: `priceCache` pega a
+// `servicios.siesacloud.com` con HTTP real. Sin este mock, cada búsqueda del
+// catálogo en los tests depende de la disponibilidad de SIESA — la suite se
+// volvió flaky (1 de 6 corridas dio 170/186 sin poder reproducirlo). Devolver
+// `{}` es exactamente lo que hace `getItemPrices` ante un error de SIESA en
+// producción: no hay precio y el catálogo responde igual.
+vi.mock('../../../src/modules/catalog/priceCache', () => ({
+  getItemPrices: vi.fn(async () => ({})),
+}));
+
 // Imports DESPUÉS del vi.mock
 import { supabaseAdmin } from '../../../src/shared/db/supabaseClient';
 import app from '../../../src/app';
